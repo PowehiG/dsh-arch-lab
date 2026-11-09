@@ -11,7 +11,7 @@
 }).call(window, undefined, undefined, undefined);
 if (window && !window.THREE && typeof globalThis !== 'undefined' && globalThis.THREE) window.THREE = globalThis.THREE
 window.__ModuleLoader__.load({
-  id: "dsh-arch-lab",
+  id: "@powehig/dsh-arch-lab",
   factory(require) {
     const React = require('react')
     const THREE = window.THREE

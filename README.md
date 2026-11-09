@@ -6,13 +6,13 @@
 
 把最新大模型论文里的**每一层**展开成可旋转、可点击的 3D 结构剖视：残差主干、Q/KV 投影、MLA latent cache、DSA indexer / top-k、稀疏注意力、MoE 路由与专家，都以带张量形状的 3D 模块呈现；点击模块即可查看论文公式与逐符号解释。原有 2D 宏观 / 层内视图完整保留。
 
-- 插件包：`dsh-arch-lab`
-- 安装：DSH `plugin_manager install_bundle dsh-arch-lab`
+- 插件包：`@powehig/dsh-arch-lab`
+- 安装：DSH `plugin_manager install_bundle @powehig/dsh-arch-lab`
 - 入口：DSH Web 侧边栏「架构显微镜」图标（`order: 12`）
 - 语言：跟随 DSH locale 自动切换中文 / English
 - 主题：跟随 DSH 深色 / 浅色主题
 - 默认视图：**3D 逐层结构**；工具栏 `3D / 2D` 随时切换，选择会记在 `localStorage`
-- 发布：GitHub `PowehiG/dsh-arch-lab` / npm `dsh-arch-lab`
+- 发布：GitHub `PowehiG/dsh-arch-lab` / npm `@powehig/dsh-arch-lab`
 - License：MIT（Three.js r128 以 MIT 许可内嵌，见 `vendor/THREE-LICENSE`）
 
 ## 3D 逐层结构剖视
@@ -254,7 +254,7 @@ residual, head, repeat, linear, conv, embed, custom`；逐层 3D 场景还引入
 在 DSH 中让 Agent 执行：
 
 ```text
-plugin_manager install_bundle dsh-arch-lab
+plugin_manager install_bundle @powehig/dsh-arch-lab
 ```
 
 也可以用本地目录安装（适合开发）：
@@ -273,7 +273,7 @@ node build.mjs
 修改 Host 或 Client 后，**仅重装同名包不会重载已缓存的 ESM 模块**。两种生效方式：
 
 1. 重启 DSH；或
-2. 使用新的包名（本版为 `dsh-arch-lab`），用 `plugin_manager`
+2. 使用新的包名（本版为 `@powehig/dsh-arch-lab`），用 `plugin_manager`
    `remove_bundle` 旧包 + `install_bundle` 新目录。
 
 不要手动改 profile 的 `package.json` / `cordis.patch.yml`，统一走 `plugin_manager`。
