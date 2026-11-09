@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Arch Lab">
+  <defs>
+    <linearGradient id="pl-a" x1="8" y1="8" x2="56" y2="56" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#22d3ee"/>
+      <stop offset="0.55" stop-color="#818cf8"/>
+      <stop offset="1" stop-color="#f472b6"/>
+    </linearGradient>
+    <linearGradient id="pl-b" x1="16" y1="18" x2="48" y2="50" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#ffffff" stop-opacity="0.92"/>
+      <stop offset="1" stop-color="#c7d2fe" stop-opacity="0.55"/>
+    </linearGradient>
+  </defs>
+  <rect x="2" y="2" width="60" height="60" rx="16" fill="#0b1020"/>
+  <rect x="2" y="2" width="60" height="60" rx="16" fill="none" stroke="url(#pl-a)" stroke-opacity="0.55" stroke-width="1.5"/>
+  <g opacity="0.95">
+    <path d="M32 9 53 21 32 33 11 21Z" fill="url(#pl-b)" opacity="0.18"/>
+    <path d="M32 9 53 21 32 33 11 21Z" fill="none" stroke="url(#pl-a)" stroke-width="1.6" stroke-linejoin="round"/>
+    <path d="M11 21v10l21 12 21-12V21" fill="none" stroke="url(#pl-a)" stroke-width="1.6" stroke-linejoin="round" opacity="0.85"/>
+    <path d="M11 31v10l21 12 21-12V31" fill="none" stroke="url(#pl-a)" stroke-width="1.6" stroke-linejoin="round" opacity="0.55"/>
+    <circle cx="32" cy="9" r="2.4" fill="#22d3ee"/>
+    <circle cx="11" cy="21" r="2" fill="#818cf8"/>
+    <circle cx="53" cy="21" r="2" fill="#f472b6"/>
+    <circle cx="32" cy="33" r="2.4" fill="#e0e7ff"/>
+    <circle cx="32" cy="53" r="2" fill="#22d3ee"/>
+  </g>
+</svg>

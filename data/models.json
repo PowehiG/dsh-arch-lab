@@ -1,0 +1,3255 @@
+{
+  "version": 2,
+  "updated": "2026-11",
+  "note": "Architecture facts are taken from the cited technical reports / model cards. confidence=reported means the number comes from a model card or blog without a fully published architectural description.",
+  "models": [
+    {
+      "id": "llm-jp-4-32b-a3b",
+      "name": "LLM-jp-4 32B-A3B",
+      "org": "LLM-jp",
+      "released": "2026-10",
+      "accent": "#14b8a6",
+      "paper": {
+        "title": "LLM-jp-4 Technical Report",
+        "url": "https://arxiv.org/abs/2610.19331"
+      },
+      "summary": "LLM-jp-4 是日本“主权 AI”路线的代表作，8B dense 与 32B-A3B MoE 都从零训练约 12T token，并公开整套数据、软件与训练配方。架构上它刻意不追新：dense 沿用 LLaMA 2、MoE 沿用 Qwen3 的 GQA + fine-grained experts，只在 32B-A3B 上补 QK-norm。真正值得看的是它的稳定性配方——router z-loss、FP32 router、0.006 的初始化标准差、按残差连接数 1/√N 缩放输出投影，以及“宽而浅”的 MoE 形状（2560 hidden、960 expert hidden、32 层）以换取更大的 GEMM。",
+      "tags": [
+        "MoE",
+        "QK-norm",
+        "router z-loss",
+        "reproducibility",
+        "tokenizer",
+        "GQA"
+      ],
+      "stats": {
+        "total": "32.1B",
+        "active": "3.8B",
+        "layers": 32,
+        "context": "65536",
+        "experts": "128",
+        "topK": 8
+      },
+      "config": {
+        "layers": 32,
+        "dModel": 2560,
+        "heads": 40,
+        "kvHeads": 4,
+        "headDim": 64,
+        "experts": 128,
+        "shared": 0,
+        "topK": 8,
+        "vocab": 196608
+      },
+      "ideas": [
+        {
+          "title": "Router z-loss 压 logit 尺度",
+          "body": "对 router logits 的配分函数取平方对数作为辅助损失，惩罚过大的 logit 幅度。它不改变路由排序，只抑制“某个专家 logit 爆炸导致路由几乎确定”的塌缩，是 MoE 训练里比 aux load-balance 更针对数值稳定的那一项。",
+          "formula": "\\mathcal{L}_{z} = \\frac{\\lambda_{z}}{T}\\sum_{t=1}^{T}\\left(\\log \\sum_{j=1}^{N}\\exp\\left(s_{j}(x_{t})\\right)\\right)^{2}, \\quad \\lambda_{z} = 10^{-3}",
+          "vars": [
+            [
+              "s_{j}(x_{t})",
+              "router 对专家 j 的 logit"
+            ],
+            [
+              "N",
+              "专家总数，128"
+            ],
+            [
+              "T",
+              "batch 内 token 数"
+            ],
+            [
+              "\\lambda_{z}",
+              "z-loss 系数，1e-3"
+            ]
+          ]
+        },
+        {
+          "title": "负载均衡损失与 FP32 路由",
+          "body": "负载均衡系数取 1e-2（与 OLMoE 一致），router 的前向与反向都在 FP32 下完成。低精度 router 会让 top-k 选择在训练中抖动，进而让专家接到的 token 分布不断跳变；把这一小块算力换成 FP32 是性价比极高的稳定手段。",
+          "formula": "\\mathcal{L}_{\\mathrm{aux}} = \\lambda_{b} \\cdot N \\sum_{j=1}^{N} f_{j} P_{j}, \\quad \\lambda_{b} = 10^{-2}, \\quad s = \\mathrm{FP32}\\left(W_{r} x\\right)",
+          "vars": [
+            [
+              "f_{j}",
+              "专家 j 实际接收 token 的比例"
+            ],
+            [
+              "P_{j}",
+              "router 给专家 j 的平均概率"
+            ],
+            [
+              "\\lambda_{b}",
+              "负载均衡系数，1e-2"
+            ],
+            [
+              "W_{r}",
+              "router 权重，FP32 计算"
+            ]
+          ]
+        },
+        {
+          "title": "初始化 0.006 与 1/√N 输出缩放",
+          "body": "所有可训练参数从标准差 0.006 的正态分布初始化（沿用 DeepSeek 的做法），并把残差相加前的输出投影按残差连接总数的平方根倒数缩放。两者合起来让 32 层深网络的残差流方差在前向中保持近似恒定，减少 warmup 阶段的 loss spike。",
+          "formula": "W \\sim \\mathcal{N}\\left(0, 0.006^{2}\\right), \\quad W_{o} \\leftarrow \\frac{W_{o}}{\\sqrt{N_{\\mathrm{res}}}}, \\quad N_{\\mathrm{res}} = 2L",
+          "vars": [
+            [
+              "W",
+              "待初始化权重矩阵"
+            ],
+            [
+              "W_{o}",
+              "残差相加前的输出投影"
+            ],
+            [
+              "N_{\\mathrm{res}}",
+              "残差连接总数，约 2L"
+            ],
+            [
+              "L",
+              "层数，32"
+            ]
+          ]
+        },
+        {
+          "title": "宽而浅的 MoE 形状",
+          "body": "32B-A3B 只有 32 层、hidden 2560，但每层 128 个专家、专家中间维 960，激活 8 个。这样单次 GEMM 的 M/N/K 更大、GPU 利用率更高，训练吞吐优于“更深更窄”的同参数配置——这是为硬件形状而不是为参数量设计的架构。",
+          "formula": "N_{\\mathrm{act}} \\approx N_{\\mathrm{attn}} + K \\cdot 3 \\cdot d \\cdot d_{\\mathrm{ff}}^{(e)} = 3.8\\mathrm{B}, \\quad K = 8,\\ d_{\\mathrm{ff}}^{(e)} = 960",
+          "vars": [
+            [
+              "K",
+              "每 token 激活专家数，8"
+            ],
+            [
+              "d",
+              "hidden 维度，2560"
+            ],
+            [
+              "d_{\\mathrm{ff}}^{(e)}",
+              "单专家中间维，960"
+            ],
+            [
+              "3",
+              "SwiGLU 的三个投影矩阵"
+            ]
+          ]
+        },
+        {
+          "title": "MoE 侧才加 QK-norm",
+          "body": "8B dense 不做 QK-norm，32B-A3B 做。原因是 MoE 层的激活方差随路由变化而波动，attention 的 q·k 尺度更容易失稳；在 MoE 模型上补 QK-norm 等于给注意力加一个与路由无关的尺度锚。",
+          "formula": "\\mathrm{attn}(Q, K, V) = \\mathrm{softmax}\\left(\\frac{\\mathrm{RMSNorm}(Q)\\,\\mathrm{RMSNorm}(K)^{\\top}}{\\sqrt{d_{h}}}\\right) V",
+          "vars": [
+            [
+              "\\mathrm{RMSNorm}",
+              "每个 head 内对 q/k 做归一化"
+            ],
+            [
+              "d_{h}",
+              "head 维度，64"
+            ],
+            [
+              "Q, K, V",
+              "GQA 下的 query / key / value"
+            ]
+          ]
+        },
+        {
+          "title": "从零训练的 196,608 词表分词器",
+          "body": "不再从既有模型词表做多阶段扩张，而是在英/日/中/韩平衡语料上从零训练 SentencePiece Unigram，词表 196,608。保留空白、禁用 NFKC、数字逐位切分、256 个 byte-fallback，使任意 UTF-8 输入可逆且代码缩进不被吞掉。",
+          "formula": "\\mathrm{cover} = 1.0, \\quad \\left|V\\right| = 196{,}608 = 256\\ \\mathrm{bytes} + 8\\ \\mathrm{special} + 344\\ \\mathrm{reserved} + \\left|V_{\\mathrm{subword}}\\right|",
+          "vars": [
+            [
+              "\\left|V\\right|",
+              "词表大小"
+            ],
+            [
+              "256",
+              "byte-fallback token 数"
+            ],
+            [
+              "344",
+              "预留控制 token 数"
+            ],
+            [
+              "\\mathrm{cover}",
+              "字符覆盖率"
+            ]
+          ]
+        }
+      ],
+      "confidence": "verified",
+      "sources": [
+        "https://arxiv.org/abs/2610.19331",
+        "https://arxiv.org/html/2610.19331v1"
+      ]
+    },
+    {
+      "id": "deepseek-v4-1-flash",
+      "name": "DeepSeek-V4.1-Flash",
+      "org": "DeepSeek-AI",
+      "released": "2026-09",
+      "accent": "#f59e0b",
+      "paper": {
+        "title": "DeepSeek-V4.1-Flash: Pushing the Limits of KV Cache Compression",
+        "url": "https://arxiv.org/abs/2609.19969"
+      },
+      "summary": "V4.1-Flash 是原生多模态 MoE，552B 主干参数 + 196B Engram 参数，40 层被切成 20 层因果编码器 + 20 层解码器，prefill 激活 8B、decode 激活 16B。它把 V4 的 CSA/HCA 混合换成纯 CSA2：跨层复用 global KV、indexer K 与 top-k 索引，配合 FP4 KV 缓存，把每 token 全局 KV 压到 890 字节（约为 V4-Flash 的 1/4）。此外引入分层稀疏索引器、Single-Pass mHC、Engram 条件记忆与 DSpark 投机解码，使单 token decode FLOPs 随上下文几乎不增长。",
+      "tags": [
+        "MoE",
+        "CSA2",
+        "CED",
+        "mHC",
+        "Engram",
+        "FP4KV",
+        "Multimodal"
+      ],
+      "stats": {
+        "total": "552B (+196B Engram)",
+        "active": "16B decode / 8B prefill",
+        "layers": 40,
+        "context": "1M",
+        "experts": "384 routed + 1 shared",
+        "topK": 6
+      },
+      "config": {
+        "layers": 40,
+        "dModel": 5120,
+        "heads": 64,
+        "kvHeads": 1,
+        "headDim": 512,
+        "experts": 384,
+        "shared": 1,
+        "topK": 6,
+        "vocab": 129280,
+        "kvBytesPerToken": 890,
+        "kvLayers": 40
+      },
+      "ideas": [
+        {
+          "title": "CED：解码器的 KV 由编码器投射",
+          "body": "因果编码器-解码器把网络的下一半做成“无 KV 计算”的解码器：l > L/2 的层不再用自己的隐藏状态生成 global KV，而是从第 L/2 层的隐藏状态 H_{L/2} 用各层独立的下投影矩阵投出来。于是 prefill 只需真正算前 20 层，复杂度从 O(NL) 降到约 O(NL/2)，几乎砍半。滑窗分支仍逐层计算以保留局部深度，因此需要 SWA replay 补算。",
+          "formula": "C_l=H_{L/2}W_l^{KV},\\quad Z_l=H_{L/2}W_l^{Z},\\quad l>\\frac{L}{2}",
+          "vars": [
+            [
+              "H_{L/2}",
+              "第 20 层（编码器末层）的隐藏状态"
+            ],
+            [
+              "W_l^{KV}",
+              "第 l 层专属的 KV 上投影"
+            ],
+            [
+              "W_l^{Z}",
+              "第 l 层专属的压缩权重投影"
+            ],
+            [
+              "C_l,Z_l",
+              "解码器第 l 层的 global KV 与其压缩权重"
+            ]
+          ]
+        },
+        {
+          "title": "CSA2 的 Full / Reindex / Reuse 三模式",
+          "body": "CSA2 把“缓存共享”和“索引共享”解耦，每层静态指定一种模式。Full 模式自己算主 KV、投出 indexer K 并跑索引；Reindex 模式复用最近一层的主 KV 与 indexer K，但用自己的 indexer Q 重新打分、选出新的 top-k；Reuse 模式连 top-k 索引也直接复用，完全不做索引计算。三种模式下每层仍保留自己的 Q 与 SWA KV。",
+          "formula": "\\text{Full}:\\left(C_l,Z_l,\\mathcal{S}_l\\right);\\quad \\text{Reindex}:\\left(C_{l_0},Z_{l_0},\\mathcal{S}_l\\right);\\quad \\text{Reuse}:\\left(C_{l_0},Z_{l_0},\\mathcal{S}_{l_0}\\right)",
+          "vars": [
+            [
+              "l_0",
+              "最近一个 Full 模式层"
+            ],
+            [
+              "\\mathcal{S}_l",
+              "第 l 层选出的 top-k 索引集合"
+            ],
+            [
+              "C_l,Z_l",
+              "主 KV 与 indexer K"
+            ]
+          ]
+        },
+        {
+          "title": "分层稀疏索引器",
+          "body": "跨层复用索引只减少索引次数，剩下的索引器仍要扫全部可见上下文。分层稀疏索引器让解码器里第一个 Full 层顺带做块级粗选：每个块（8 个位置）取其内部索引分的最大值作为块分，选出 2048 个块，覆盖的 16384 个位置构成候选池。后续 Reindex 层只在这个池里打分并选自己的 top-512，每 query 的打分开销因此与上下文长度无关。",
+          "formula": "b^{\\mathrm{score}}=\\max_{s\\in\\mathcal{B}_b}I_{t,s},\\quad \\mathcal{P}_t=\\bigcup_{b\\in\\mathrm{TopK}\\left(b^{\\mathrm{score}},2048\\right)}\\mathcal{B}_b,\\quad \\left|\\mathcal{P}_t\\right|=2048\\times 8=16384",
+          "vars": [
+            [
+              "\\mathcal{B}_b",
+              "第 b 个块，含 8 个位置"
+            ],
+            [
+              "b^{\\mathrm{score}}",
+              "块分 = 块内最大索引分"
+            ],
+            [
+              "\\mathcal{P}_t",
+              "候选池，16384 个位置"
+            ],
+            [
+              "index_topk",
+              "最终 top-k = 512"
+            ]
+          ]
+        },
+        {
+          "title": "Single-Pass mHC",
+          "body": "原版 mHC 的输入混合系数 A_l 依赖本层残差 X_l 的完整归约，必须再读一遍 X_l，激活访存是理论下界的 2 倍。Single-Pass mHC 把输入混合系数整体错位一个 block：第 l 层改用上一层算出的 A_{l−1} 去混合 X_l，依赖消失，残差更新与系数预测可在同一次遍历中完成，配合 Mega-mHC 内核把激活访存减半。",
+          "formula": "X_{l+1}=B_lX_l+C_l\\mathcal{F}_l\\left(A_{l-1}X_l\\right),\\quad \\left(A_l,B_l,C_l\\right)=\\mathcal{H}\\left(X_l\\right)",
+          "vars": [
+            [
+              "A_{l-1}",
+              "上一层预测的输入混合系数（错位一位）"
+            ],
+            [
+              "\\mathcal{H}",
+              "系数预测器，含归一化与投影"
+            ],
+            [
+              "X_l",
+              "第 l 层的 n 条残差流"
+            ]
+          ]
+        },
+        {
+          "title": "Engram 条件记忆",
+          "body": "Engram 是挂在少数层上的超大稀疏查找表（配置中两层各约 3.84 亿条目），按最近 n 个 token 的 n-gram 哈希直接取回一个嵌入，再门控加回隐藏状态。它把“记忆”从稠密参数里拆出来变成条件计算：每个 token 只碰常数条目的表项，容量随表增大而线性增长，几乎不增加每 token 的 FLOPs。",
+          "formula": "\\mathbf{e}_t=E_k\\left[\\mathrm{hash}\\left(t_{i-k+1},\\dots,t_i\\right)\\right],\\quad k\\le 4,\\quad \\mathbf{h}_t\\leftarrow \\mathbf{h}_t+\\alpha_t\\odot\\mathbf{e}_t",
+          "vars": [
+            [
+              "E_k",
+              "第 k 阶 n-gram 的查找表，约 3.84 亿条目"
+            ],
+            [
+              "k",
+              "n-gram 阶数，最大 4"
+            ],
+            [
+              "\\alpha_t",
+              "门控系数"
+            ],
+            [
+              "engram_layer_ids",
+              "挂在第 1、14 层"
+            ]
+          ]
+        },
+        {
+          "title": "FP4 KV 缓存与字节预算",
+          "body": "CSA2 已在层维、序列维、条目维三个方向压缩 KV，V4.1-Flash 再把主 KV 缓存量化到 FP4（训练时就做，性能损失可忽略）。叠加跨层复用后，每 token 的全局 KV（常驻 HBM）只有 890 字节，约为 V4-Flash 的 1/4；再用 SWA Bounded Replay 只重放最近 n_win 个 token 来近似重建滑窗状态，持久化 KV（SSD/主机内存）降到约 1/8。",
+          "formula": "890\\ \\text{bytes/token}\\approx\\frac{1}{4}\\times\\text{V4-Flash},\\quad \\text{persistent}\\approx\\frac{1}{8}\\times\\text{V4-Flash}",
+          "vars": [
+            [
+              "890 B/token",
+              "每 token 全局 KV 字节数"
+            ],
+            [
+              "FP4",
+              "主 KV 的存储精度，每元素 0.5 字节"
+            ],
+            [
+              "1/4, 1/8",
+              "相对 V4-Flash 的全局 KV 与持久化 KV 比例"
+            ]
+          ]
+        },
+        {
+          "title": "SWA Bounded Replay",
+          "body": "解码器的滑窗 KV 无法由编码器投射，必须重放。精确重建需要回放最近 L×n_win 个 token；V4.1-Flash 发现只回放最近 n_win 个 token 就够，性能损失可忽略。这把滑窗补算量从 (L/2)·n_win 降到 n_win，正是可以不再把 SWA KV 持久化到 SSD、改用少量重算换取存储的根本原因。",
+          "formula": "\\text{replay}:\\ \\frac{L}{2}\\times n_{\\mathrm{win}}\\ \\longrightarrow\\ n_{\\mathrm{win}}=128",
+          "vars": [
+            [
+              "L",
+              "总层数 40"
+            ],
+            [
+              "n_{\\mathrm{win}}",
+              "滑窗大小 = 128"
+            ],
+            [
+              "replay",
+              "为解码器重建滑窗 KV 所需的回放 token 数"
+            ]
+          ]
+        },
+        {
+          "title": "按模态分离的负载均衡偏置",
+          "body": "图像 token 与文本 token 的表示分布差异大，路由偏好也不同，合并统计会互相掩盖失衡。V4.1-Flash 为两种模态各维护一套专家偏置：路由时按 token 所属模态取对应偏置参与 top-k 选择，但加权仍用原始打分；每步训练后两套偏置按各自负载独立更新。这样在不引入辅助损失的前提下分别把两个模态的专家利用率拉平。",
+          "formula": "b_i^{(m)}\\leftarrow b_i^{(m)}-\\gamma\\ \\text{if overloaded},\\quad b_i^{(m)}\\leftarrow b_i^{(m)}+\\gamma\\ \\text{if underloaded},\\quad m\\in\\left\\{\\text{text},\\text{image}\\right\\}",
+          "vars": [
+            [
+              "b_i^{(m)}",
+              "模态 m 下专家 i 的偏置"
+            ],
+            [
+              "\\gamma",
+              "偏置更新步长"
+            ],
+            [
+              "m",
+              "模态：text 或 image"
+            ]
+          ]
+        }
+      ],
+      "confidence": "verified",
+      "sources": [
+        "https://arxiv.org/abs/2609.19969",
+        "https://ar5iv.labs.arxiv.org/html/2609.19969",
+        "https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash",
+        "https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash/raw/main/config.json"
+      ]
+    },
+    {
+      "id": "kimi-k3",
+      "name": "Kimi K3",
+      "org": "Moonshot AI",
+      "released": "2026-07",
+      "accent": "#34d399",
+      "paper": {
+        "title": "Kimi K3: Open Frontier Intelligence",
+        "url": "https://arxiv.org/abs/2607.24653"
+      },
+      "summary": "Kimi K3 把主干推到 2.78T 总参 / 104B 激活：每块 3 层 Kimi Delta Attention 加 1 层 Gated MLA（93 层里 69 KDA + 24 MLA），MLA 全部用 NoPE，位置感完全由 KDA 的衰减提供。深度上用 Attention Residuals 让每层对之前所有层做 softmax 检索，宽度上用 Stable LatentMoE 把路由专家扩到 896 选 16（稀疏度 56），并以 Quantile Balancing、SiTU-GLU、上投影前 RMSNorm 抑制极稀疏带来的激活爆炸。",
+      "tags": [
+        "Hybrid",
+        "Linear Attention",
+        "MoE",
+        "Attention Residual",
+        "KDA",
+        "NoPE",
+        "MLA"
+      ],
+      "stats": {
+        "total": "2.78T",
+        "active": "104B",
+        "layers": 93,
+        "context": "1M",
+        "experts": "896",
+        "topK": 16
+      },
+      "config": {
+        "layers": 93,
+        "dModel": 7168,
+        "heads": 96,
+        "kvHeads": "?",
+        "headDim": "?",
+        "experts": 896,
+        "shared": 2,
+        "topK": 16,
+        "vocab": 160000,
+        "kvLayers": 24
+      },
+      "ideas": [
+        {
+          "title": "3:1 的 KDA + Gated MLA 混合与 NoPE",
+          "body": "每个块固定 3 层 KDA 接 1 层 Gated MLA，全模型 69 层 KDA 加 24 层 MLA，末尾再补一层 MLA 保证最后一层永远做全局注意力。MLA 层全部不加位置编码，位置与近因性由中间 KDA 的衰减提供，因此把上下文从 128K 拉到 1M 时不需要重调 RoPE base 或上 YaRN。",
+          "formula": "\\text{block}=3\\times\\text{KDA}\\rightarrow 1\\times\\text{Gated MLA}, N_{\\mathrm{KDA}}=69, N_{\\mathrm{MLA}}=24",
+          "vars": [
+            [
+              "KDA",
+              "Kimi Delta Attention 线性注意力层"
+            ],
+            [
+              "Gated MLA",
+              "带输出门的 MLA 全局注意力层"
+            ],
+            [
+              "NoPE",
+              "不加位置编码，只靠 KDA 衰减提供位置"
+            ]
+          ]
+        },
+        {
+          "title": "KDA 的通道级衰减 delta 递推",
+          "body": "KDA 在 delta 规则更新之前先做通道级衰减：对角矩阵 Diag(α_t) 让每个 key 通道有独立的保留率，β_t 控制写入强度。相比 Gated DeltaNet 的标量门，这种逐通道门让模型可以只遗忘部分通道而保留其余通道的记忆。",
+          "formula": "S_{t}=\\left(I-\\beta_{t}k_{t}k_{t}^{\\top}\\right)\\mathrm{Diag}\\left(\\alpha_{t}\\right)S_{t-1}+\\beta_{t}k_{t}v_{t}^{\\top}, \\tilde{o}_{t}=S_{t}^{\\top}q_{t}",
+          "vars": [
+            [
+              "\\alpha_{t}",
+              "通道级单步保留率，向量，取值 (0,1)"
+            ],
+            [
+              "\\beta_{t}",
+              "delta 写入强度，标量"
+            ],
+            [
+              "\\mathrm{Diag}\\left(\\alpha_{t}\\right)",
+              "把向量摊成对角矩阵"
+            ],
+            [
+              "S_{t}",
+              "d_k × d_v 的循环状态"
+            ]
+          ]
+        },
+        {
+          "title": "下界受控的 log-decay",
+          "body": "Kimi Linear 用 -exp(A)·Softplus(z) 作为 log-decay，取值无下界，chunk 内要除以累计衰减就会溢出，只能对对角 tile 做逐位置计算。K3 改成缩放 sigmoid，把 log-decay 压进 (g_min, 0)，累计衰减的倒数不超过 e^80，仍在 BF16 动态范围内，于是对角 tile 也能用 Tensor Core 稠密矩阵乘。",
+          "formula": "g_{t}^{h}=g_{\\min}\\mathrm{sigmoid}\\left(e^{A_{h}}z_{t}^{h}\\right)\\in\\left(g_{\\min},0\\right), \\alpha_{t}^{h}=\\exp\\left(g_{t}^{h}\\right)\\in\\left(e^{g_{\\min}},1\\right)",
+          "vars": [
+            [
+              "g_{t}^{h}",
+              "第 h 个 head 的逐通道 log-decay"
+            ],
+            [
+              "A_{h}",
+              "可学习的 per-head log 尺度，初始 0"
+            ],
+            [
+              "g_{\\min}",
+              "下界，K3 取 -5"
+            ],
+            [
+              "z_{t}^{h}",
+              "低秩投影加 head bias 得到的衰减 logit"
+            ]
+          ]
+        },
+        {
+          "title": "Attention Residuals：对深度做注意力",
+          "body": "标准残差把所有历史压成一个 h_l，是深度方向的瓶颈；AttnRes 让每层用一个可学习的伪 query w_l 对 embedding 和之前所有层输出做 softmax 加权求和。key 先过 RMSNorm 再点积，避免输出量级大的层垄断权重；分块版本把 L 层按 12 层一块归并，开销从 O(Ld) 降到 O(Nd)，K3 用 8 块共 9 个源。",
+          "formula": "\\alpha_{i\\to l}=\\frac{\\exp\\left(w_{l}^{\\top}\\mathrm{RMSNorm}\\left(k_{i}\\right)\\right)}{\\sum_{j=0}^{l-1}\\exp\\left(w_{l}^{\\top}\\mathrm{RMSNorm}\\left(k_{j}\\right)\\right)}, h_{l}=\\sum_{i=0}^{l-1}\\alpha_{i\\to l}v_{i}",
+          "vars": [
+            [
+              "w_{l}",
+              "第 l 层专属的伪 query"
+            ],
+            [
+              "k_{i}=v_{i}",
+              "第 i 层输出（i=0 时是 token embedding）"
+            ],
+            [
+              "\\alpha_{i\\to l}",
+              "第 l 层读第 i 层的权重"
+            ],
+            [
+              "N=8",
+              "分块数，每块 12 层"
+            ]
+          ]
+        },
+        {
+          "title": "Stable LatentMoE：低秩专家加共享分支",
+          "body": "路由专家工作在 3584 维的 latent 空间（0.5 × hidden），只有共享专家保持 7168 维全宽，于是 896 个专家也不会让通信量随专家数线性爆炸。聚合后的 routed 表示先过 RMSNorm 再上投影，缓解四连矩阵乘带来的激活爆炸，共享专家固定 2 个。",
+          "formula": "u=\\sum_{i\\in\\mathrm{TopK}\\left(x\\right)}p_{i}E_{i}^{\\mathrm{routed}}\\left(W^{\\downarrow}x\\right), y=\\sum_{j=1}^{N_{s}}E_{j}^{\\mathrm{shared}}\\left(x\\right)+W^{\\uparrow}\\mathrm{RMSNorm}\\left(u\\right)",
+          "vars": [
+            [
+              "W^{\\downarrow},W^{\\uparrow}",
+              "7168 ↔ 3584 的下/上投影"
+            ],
+            [
+              "E_{i}^{\\mathrm{routed}}",
+              "latent 空间里的路由专家"
+            ],
+            [
+              "N_{s}",
+              "全宽共享专家数，K3 取 2"
+            ],
+            [
+              "\\mathrm{sparsity}=56",
+              "896 / 16"
+            ]
+          ]
+        },
+        {
+          "title": "Quantile Balancing：用分位数定 bias",
+          "body": "无辅助损失路由只把专家 bias 加到 top-k 选择的打分上，不进入混合权重。固定步长的 sign 更新在 896 个专家时太慢且会震荡，QB 改为一次前向就解出每个专家的 bias：用 top-(k+1) 的第 k+1 名作为 cutoff α，再取 margin 的 (1-k/n) 分位数作为负 bias，使每个专家正好拿到目标负载 q = mk/n。",
+          "formula": "\\hat{b}_{j}^{\\left(t+1\\right)}=-\\mathrm{quantile}_{1-k/n}\\left(s_{:,j}-\\alpha^{\\left(t\\right)}\\right), b^{\\left(t+1\\right)}=\\hat{b}^{\\left(t+1\\right)}-\\mathrm{mean}\\left(\\hat{b}^{\\left(t+1\\right)}\\right)",
+          "vars": [
+            [
+              "s_{:,j}",
+              "所有 token 对专家 j 的路由打分"
+            ],
+            [
+              "\\alpha^{\\left(t\\right)}",
+              "top-(k+1) 得到的逐 token cutoff"
+            ],
+            [
+              "q=mk/n",
+              "每个专家的目标负载"
+            ],
+            [
+              "k/n",
+              "激活比例，896 选 16 时为 1/56"
+            ]
+          ]
+        },
+        {
+          "title": "SiTU-GLU：给 SwiGLU 加软饱和",
+          "body": "SwiGLU 的 gate 与 up 两支都无界，坐标同时变大时会产生激活 outlier，低精度下容易溢出。SiTU-GLU 对两支分别套 β·tanh(x/β)，在原点附近近似线性、保持 SwiGLU 的局部响应，同时把输出幅度限制在 β₁β₂ 以内，K3 取 β₁=4、β₂=25。",
+          "formula": "\\mathrm{SiTU\\text{-}GLU}\\left(x\\right)=\\left[\\beta_{1}\\tanh\\left(\\frac{W_{g}x}{\\beta_{1}}\\right)\\odot\\sigma\\left(W_{g}x\\right)\\right]\\odot\\left[\\beta_{2}\\tanh\\left(\\frac{W_{u}x}{\\beta_{2}}\\right)\\right]",
+          "vars": [
+            [
+              "W_{g},W_{u}",
+              "gate 与 up 分支的投影"
+            ],
+            [
+              "\\beta_{1}",
+              "gate 支的软上限，取 4"
+            ],
+            [
+              "\\beta_{2}",
+              "up 支的软上限，取 25"
+            ],
+            [
+              "\\left|f\\right|\\le 100",
+              "输出幅度上界 β₁β₂"
+            ]
+          ]
+        }
+      ],
+      "confidence": "verified",
+      "sources": [
+        "https://arxiv.org/abs/2607.24653",
+        "https://arxiv.org/html/2607.24653",
+        "https://arxiv.org/abs/2510.26692"
+      ]
+    },
+    {
+      "id": "gemma-4-26b-a4b",
+      "name": "Gemma 4 26B-A4B",
+      "org": "Google DeepMind",
+      "released": "2026-07",
+      "accent": "#e879f9",
+      "paper": {
+        "title": "Gemma 4 Technical Report",
+        "url": "https://arxiv.org/abs/2607.02770"
+      },
+      "summary": "Gemma 4 把 Gemma 3 的“局部/全局 5:1 交替”推进成一套完整的 KV cache 压缩组合：QK-norm 稳定 attention、pp-RoPE 只旋转 25% 的 head 维度、global 层直接令 values = keys、并让多层共享同一份 KV。26B-A4B 是 128 专家 top-8 的 MoE（3.8B 激活），词表 262k，原生支持 256K 上下文。报告还给出 encoder-free 的 12B 变体：丢掉 ViT 与 Conformer，直接把 48×48 图像 patch 和 40ms 音频块投影进 LLM  embedding 空间。",
+      "tags": [
+        "MoE",
+        "QK-norm",
+        "local/global attention",
+        "pp-RoPE",
+        "KV sharing",
+        "MTP",
+        "Hybrid"
+      ],
+      "stats": {
+        "total": "26B",
+        "active": "3.8B",
+        "layers": 30,
+        "context": "256K",
+        "experts": "128",
+        "topK": 8
+      },
+      "config": {
+        "layers": 30,
+        "dModel": 2816,
+        "heads": 16,
+        "kvHeads": 8,
+        "headDim": 256,
+        "experts": 128,
+        "shared": 0,
+        "topK": 8,
+        "vocab": 262144,
+        "kvLayers": 5
+      },
+      "ideas": [
+        {
+          "title": "QK-norm：点积前先归一化 q 与 k",
+          "body": "在每个 head 内对 query 和 key 各做一次 RMSNorm（带可学习缩放），再做点积。这样 logits 的方差不再随 head 维度与激活尺度漂移，是 Gemma 系列能在 bf16 下稳定训练超长上下文的前提。",
+          "formula": "\\hat{q} = \\gamma_{q} \\odot \\frac{q}{\\sqrt{\\frac{1}{d_{h}}\\sum_{j=1}^{d_{h}} q_{j}^{2} + \\epsilon}}, \\quad \\hat{k} = \\gamma_{k} \\odot \\frac{k}{\\sqrt{\\frac{1}{d_{h}}\\sum_{j=1}^{d_{h}} k_{j}^{2} + \\epsilon}}",
+          "vars": [
+            [
+              "q, k",
+              "单个 head 的 query / key 向量"
+            ],
+            [
+              "d_{h}",
+              "head 维度"
+            ],
+            [
+              "\\gamma_{q}, \\gamma_{k}",
+              "逐维可学习缩放"
+            ],
+            [
+              "\\epsilon",
+              "数值稳定项，1e-6"
+            ]
+          ]
+        },
+        {
+          "title": "5:1 局部/全局交替与 1024 窗口",
+          "body": "30 层里每 5 层 sliding-window attention 配 1 层 full attention，窗口只有 1024 token（E2B 为 4:1）。局部层承担大部分 token 间交互，全局层每 6 层才出现一次，KV cache 与 attention 计算随之按层分层。",
+          "formula": "\\mathrm{type}(l) = \\mathrm{sliding} \\text{ if } l \\ \\mathrm{mod}\\  6 \\neq 5, \\quad \\mathrm{type}(l) = \\mathrm{global} \\text{ if } l \\ \\mathrm{mod}\\  6 = 5, \\quad W = 1024",
+          "vars": [
+            [
+              "l",
+              "层索引，0..29"
+            ],
+            [
+              "W",
+              "sliding window 宽度"
+            ],
+            [
+              "\\mathrm{global}",
+              "全注意力层，共 5 层"
+            ]
+          ]
+        },
+        {
+          "title": "Global 层令 values = keys",
+          "body": "在 global attention 层不再单独投影 value，直接把 key 当作 value 使用，省掉一半的 KV 投影与一半的 cache 写入。配合 pp-RoPE，报告称 global KV cache 最多缩小 37.5%。",
+          "formula": "K^{(l)} = W_{k} h^{(l)}, \\quad V^{(l)} = K^{(l)} \\quad \\Rightarrow \\quad M_{\\mathrm{KV}}^{\\mathrm{global}} \\downarrow\\ 37.5\\%",
+          "vars": [
+            [
+              "W_{k}",
+              "key 投影矩阵"
+            ],
+            [
+              "h^{(l)}",
+              "第 l 层输入隐状态"
+            ],
+            [
+              "M_{\\mathrm{KV}}^{\\mathrm{global}}",
+              "global 层 KV cache 占用"
+            ]
+          ]
+        },
+        {
+          "title": "pp-RoPE：只旋转 25% 的维度",
+          "body": "global 层采用 proportional partial RoPE，p=0.25：head 维度中只有前四分之一做旋转，其余维度完全不携带位置信息（NoPE）。这让 global 层同时具备“精确相对位置”和“无位置内容寻址”两种子空间，也直接把需要存储的旋转维度压到 1/4。",
+          "formula": "x'_{2k} = x_{2k}\\cos\\left(t\\theta_{k}\\right) - x_{2k+1}\\sin\\left(t\\theta_{k}\\right), \\quad x'_{2k+1} = x_{2k}\\sin\\left(t\\theta_{k}\\right) + x_{2k+1}\\cos\\left(t\\theta_{k}\\right), \\quad 2k < p\\,d_{h}",
+          "vars": [
+            [
+              "p",
+              "参与旋转的维度比例，0.25"
+            ],
+            [
+              "d_{h}",
+              "head 维度，global 层为 512"
+            ],
+            [
+              "\\theta_{k}",
+              "旋转频率，base 1e6（global）/ 1e4（local）"
+            ],
+            [
+              "t",
+              "token 位置"
+            ]
+          ]
+        },
+        {
+          "title": "Logit softcapping",
+          "body": "输出 logits 在 softmax 前先经过 30·tanh(z/30)，把极端 logit 压回可表示区间。它是软截断而非硬 clamp，梯度在饱和区仍连续，避免低精度推理时出现 inf/nan。",
+          "formula": "z' = 30 \\cdot \\tanh\\left(\\frac{z}{30}\\right)",
+          "vars": [
+            [
+              "z",
+              "LM head 输出的原始 logit"
+            ],
+            [
+              "30",
+              "softcap 上限，config 中 final_logit_softcapping"
+            ]
+          ]
+        },
+        {
+          "title": "跨层共享 KV cache",
+          "body": "若干连续层不再各自维护 KV，而是复用前面某一层的 K/V（E2B/E4B 的共享比例为 20/35 与 18/42）。这让 KV cache 随层数增长的速度显著低于线性，是端侧长上下文的关键。",
+          "formula": "K^{(l)}, V^{(l)} = K^{(l_{0})}, V^{(l_{0})}, \\quad l \\in \\mathcal{S},\\ l_{0} = \\min\\mathcal{S}",
+          "vars": [
+            [
+              "\\mathcal{S}",
+              "共享同一份 KV 的层集合"
+            ],
+            [
+              "l_{0}",
+              "被共享的源层"
+            ],
+            [
+              "K^{(l)}, V^{(l)}",
+              "第 l 层实际读取的 KV"
+            ]
+          ]
+        },
+        {
+          "title": "MTP drafter：旁路小 Transformer 交叉注意主模型 KV",
+          "body": "投机解码用的 MTP 头是一个 4 层小 Transformer（26B-A4B 上维度 1024，3 层局部 + 1 层全局），输入是主模型上一 step 的末层激活与 token embedding，并交叉注意主模型的 KV。因为复用主模型 KV，它不需要 MTP prefill，草稿长度可以任意延长。",
+          "formula": "p_{\\mathrm{draft}}\\left(y_{t+k} \\mid y_{\\le t}\\right) = \\mathrm{MTP}\\left(h^{\\mathrm{main}}_{t},\\ e_{t},\\ K^{\\mathrm{main}}_{\\le t},\\ V^{\\mathrm{main}}_{\\le t}\\right)",
+          "vars": [
+            [
+              "h^{\\mathrm{main}}_{t}",
+              "主模型第 t 步末层激活"
+            ],
+            [
+              "e_{t}",
+              "当前 token embedding"
+            ],
+            [
+              "K^{\\mathrm{main}}_{\\le t}",
+              "主模型 KV，被 drafter 交叉注意"
+            ]
+          ]
+        }
+      ],
+      "confidence": "verified",
+      "sources": [
+        "https://arxiv.org/abs/2607.02770",
+        "https://arxiv.org/html/2607.02770v2",
+        "https://huggingface.co/google/gemma-4-26B-A4B-it"
+      ]
+    },
+    {
+      "id": "deepseek-v4",
+      "name": "DeepSeek-V4-Pro / V4-Flash",
+      "org": "DeepSeek-AI",
+      "released": "2026-04",
+      "accent": "#14b8a6",
+      "paper": {
+        "title": "DeepSeek-V4: Towards Highly Efficient Million-Token Context Intelligence",
+        "url": "https://arxiv.org/abs/2606.19348"
+      },
+      "summary": "V4 系列包含 V4-Pro（1.6T 总参 / 49B 激活）与 V4-Flash（284B / 13B），原生支持 100 万 token 上下文。核心改动是 CSA 与 HCA 交替的混合注意力：CSA 先把每 m 个 token 的 KV 压成一条（m=4），再在其上做 DSA top-k；HCA 用更激进的压缩比（m′=128）但保持稠密注意力。此外用 mHC 把残差映射约束到双随机矩阵流形以稳定深层训练，并首次把 Muon 优化器引入该家族。在 1M 上下文下，V4-Pro 的单 token 推理 FLOPs 仅为 V3.2 的 27%，KV cache 仅为 10%。",
+      "tags": [
+        "MoE",
+        "CSA",
+        "HCA",
+        "mHC",
+        "Muon",
+        "MTP"
+      ],
+      "stats": {
+        "total": "1.6T (Pro) / 284B (Flash)",
+        "active": "49B (Pro) / 13B (Flash)",
+        "layers": 61,
+        "context": "1M",
+        "experts": "384 routed + 1 shared",
+        "topK": 6
+      },
+      "config": {
+        "layers": 61,
+        "dModel": 7168,
+        "heads": 128,
+        "kvHeads": 1,
+        "headDim": 512,
+        "experts": 384,
+        "shared": 1,
+        "topK": 6,
+        "vocab": 129280,
+        "kvLayers": 61,
+        "kvLora": 512,
+        "ropeDim": 64
+      },
+      "ideas": [
+        {
+          "title": "CSA 的可学习 KV 压缩",
+          "body": "CSA 先由隐藏状态算出两组 KV 候选 C^a、C^b 及各自的压缩权重 Z^a、Z^b，再加可学习位置偏置 B^a、B^b。对第 i 个压缩条目，把 [m·i, m(i+1)) 的 a 段与 [m(i−1), mi) 的 b 段拼起来做行 Softmax 得到权重，两段加权求和即得一条压缩 KV。两段有重叠，相当于一个可学习、带因果对齐的滑动窗口池化。",
+          "formula": "\\left[S^{a};S^{b}\\right]=\\mathrm{Softmax}_{\\mathrm{row}}\\left(\\left[Z^{a}_{mi:m(i+1)-1}+B^{a};\\ Z^{b}_{m(i-1):mi-1}+B^{b}\\right]\\right),\\quad C_i^{\\mathrm{Comp}}=\\sum_{j=mi}^{m(i+1)-1}S_j^{a}\\odot C_j^{a}+\\sum_{j=m(i-1)}^{mi-1}S_j^{b}\\odot C_j^{b}",
+          "vars": [
+            [
+              "m",
+              "压缩比，CSA 中为 4"
+            ],
+            [
+              "C^{a},C^{b}",
+              "两组 KV 候选，由 W^{aKV}、W^{bKV} 投影得到"
+            ],
+            [
+              "Z^{a},Z^{b}",
+              "压缩权重，由 W^{aZ}、W^{bZ} 得到"
+            ],
+            [
+              "B^{a},B^{b}",
+              "可学习位置偏置，形状 m×c"
+            ],
+            [
+              "\\odot",
+              "逐元素乘"
+            ]
+          ]
+        },
+        {
+          "title": "压缩条目上的 DSA 稀疏选择",
+          "body": "压缩后序列长度变为 n/m，CSA 再在这 n/m 条压缩条目上跑 DSA：lightning indexer 打分、每个 query 只取 top-k（配置中 index_topk=1024）条，并与 128 条滑窗 KV 拼接。滑窗分支负责局部细粒度依赖，压缩稀疏分支负责全局上下文，两者相加构成一层注意力的输入。",
+          "formula": "\\mathbf{u}_t=\\mathrm{Attn}\\left(\\mathbf{h}_t,\\ \\left\\{C_i^{\\mathrm{Comp}}:\\ I_{t,i}\\in\\mathrm{TopK}\\left(I_{t,:},1024\\right)\\right\\}\\cup\\mathcal{W}_t\\right),\\quad \\left|\\mathcal{W}_t\\right|=128",
+          "vars": [
+            [
+              "I_{t,i}",
+              "lightning indexer 对压缩条目的打分"
+            ],
+            [
+              "1024",
+              "index_topk，每 query 选中的压缩条目数"
+            ],
+            [
+              "\\mathcal{W}_t",
+              "滑窗 KV 集合，窗口 128"
+            ],
+            [
+              "C_i^{\\mathrm{Comp}}",
+              "第 i 条压缩 KV"
+            ]
+          ]
+        },
+        {
+          "title": "HCA 极致压缩 + 稠密注意力",
+          "body": "HCA 与 CSA 相反：压缩比极大（配置中为 128，而 CSA 为 4），但不再做稀疏选择，而是对全部压缩条目做稠密注意力。层配置里 compress_ratios 交替出现 4 与 128，即 CSA 层与 HCA 层交错堆叠。这样绝大多数层只处理 n/128 长度的序列，是 1M 上下文可承受的根本原因。",
+          "formula": "\\mathbf{u}_t=\\mathrm{Attn}\\left(\\mathbf{h}_t,\\ \\left\\{C_i^{\\mathrm{HCA}}:\\ i\\le\\left\\lfloor t/m'\\right\\rfloor\\right\\}\\right),\\quad m'=128\\gg m=4",
+          "vars": [
+            [
+              "m'",
+              "HCA 压缩比 = 128"
+            ],
+            [
+              "C_i^{\\mathrm{HCA}}",
+              "HCA 压缩条目"
+            ],
+            [
+              "稠密",
+              "不做 top-k，全部可见压缩条目都参与"
+            ]
+          ]
+        },
+        {
+          "title": "mHC：残差流加宽",
+          "body": "mHC 把残差流宽度扩大 n_hc 倍（配置 hc_mult=4），残差状态从 R^d 变成 R^{n_hc×d}。每层用三个线性映射 A（输入混合）、B（残差变换）、C（输出混合）控制信息流，实际送入层内的仍是 d 维，所以加宽不改变内层设计，只增加极小的计算开销。",
+          "formula": "X_{l+1}=B_lX_l+C_l\\mathcal{F}_l\\left(A_lX_l\\right),\\quad X_l\\in\\mathbb{R}^{n_{\\mathrm{hc}}\\times d},\\ A_l\\in\\mathbb{R}^{1\\times n_{\\mathrm{hc}}},\\ B_l\\in\\mathbb{R}^{n_{\\mathrm{hc}}\\times n_{\\mathrm{hc}}}",
+          "vars": [
+            [
+              "n_{\\mathrm{hc}}",
+              "残差流扩展倍数 = 4"
+            ],
+            [
+              "X_l",
+              "第 l 层前的残差状态，n_hc×d"
+            ],
+            [
+              "A_l",
+              "输入映射，把 n_hc 条流压成 1 条"
+            ],
+            [
+              "B_l",
+              "残差变换矩阵"
+            ],
+            [
+              "C_l",
+              "输出映射，把层输出写回 n_hc 条流"
+            ]
+          ]
+        },
+        {
+          "title": "双随机约束与 Sinkhorn 投影",
+          "body": "朴素 HC 在深层堆叠时数值不稳定。mHC 的核心是把 B_l 约束到双随机矩阵流形（Birkhoff 多面体）：行和、列和都为 1 且元素非负，因此谱范数不超过 1，残差变换是非扩张的，前向与反向都稳定，且该集合对乘法封闭。实现上对 B̃ 先取 exp 保证正性，再交替做行、列归一化，迭代 20 次收敛。",
+          "formula": "B_l\\in\\mathcal{M}=\\left\\{M:\\ M\\mathbf{1}_n=\\mathbf{1}_n,\\ \\mathbf{1}_n^{T}M=\\mathbf{1}_n^{T},\\ M\\ge 0\\right\\},\\quad M^{(t)}=\\mathcal{T}_r\\left(\\mathcal{T}_c\\left(M^{(t-1)}\\right)\\right),\\ t_{\\max}=20",
+          "vars": [
+            [
+              "\\mathcal{M}",
+              "双随机矩阵流形（Birkhoff 多面体）"
+            ],
+            [
+              "\\mathcal{T}_r,\\mathcal{T}_c",
+              "行归一化与列归一化算子"
+            ],
+            [
+              "M^{(0)}",
+              "exp(B̃_l)，保证正性"
+            ],
+            [
+              "t_{\\max}",
+              "Sinkhorn 迭代次数 = 20"
+            ]
+          ]
+        },
+        {
+          "title": "MoE 换成 Sqrt(Softplus) 与哈希路由",
+          "body": "V4 保留 DeepSeekMoE 的细粒度路由 + 共享专家结构，但把亲和度从 Sigmoid 换成 Sqrt(Softplus)，使打分恒正且梯度更平滑。前 3 层（num_hash_layers=3）不再是稠密 FFN，而是按 token id 的哈希函数静态指定专家的 MoE 层，省掉路由计算。负载均衡仍用无辅助损失的偏置策略，另加一个轻微的序列级损失兜底。",
+          "formula": "s_{i,t}=\\sqrt{\\mathrm{Softplus}\\left(\\mathbf{u}_t^{T}\\mathbf{e}_i\\right)},\\quad \\text{hash layers}:\\ \\mathrm{expert}=\\mathrm{hash}\\left(\\mathrm{token\\ id}\\right)\\bmod N_r",
+          "vars": [
+            [
+              "s_{i,t}",
+              "token 对专家 i 的亲和度"
+            ],
+            [
+              "N_r",
+              "路由专家数 = 384"
+            ],
+            [
+              "num_hash_layers",
+              "前 3 层用哈希路由"
+            ],
+            [
+              "K_r",
+              "每 token 激活 6 个专家"
+            ]
+          ]
+        },
+        {
+          "title": "Muon 优化器与 Newton–Schulz 正交化",
+          "body": "V4 首次在该家族用 Muon 替代 AdamW 训练大部分参数：先累积动量矩阵，再用 Newton–Schulz 迭代把动量矩阵近似正交化（等价于取其极分解的 U V^T），然后更新权重。正交化让不同方向的更新尺度一致，收敛更快、训练更稳；论文还专门处理了注意力 logits 爆炸问题。",
+          "formula": "M_t=\\mu M_{t-1}+G_t,\\quad O_t=\\mathrm{NS}\\left(M_t\\right)\\approx UV^{T},\\quad W_t=W_{t-1}-\\eta\\left(O_t+\\lambda W_{t-1}\\right)",
+          "vars": [
+            [
+              "M_t",
+              "动量矩阵"
+            ],
+            [
+              "G_t",
+              "当前梯度"
+            ],
+            [
+              "\\mathrm{NS}(\\cdot)",
+              "Newton–Schulz 迭代，求近似正交化因子"
+            ],
+            [
+              "U,V",
+              "M 的奇异值分解左右因子"
+            ],
+            [
+              "\\eta,\\lambda",
+              "学习率与权重衰减"
+            ]
+          ]
+        },
+        {
+          "title": "百万上下文的效率账本",
+          "body": "CSA 在序列维压缩 4 倍再做 top-k，HCA 压缩 128 倍且稠密，两者交替使全局分支的实际长度极短；再叠加 FP4 的路由专家权重与 indexer QK 路径的 FP4 QAT，显存与算力同时下降。论文给出的对照基准是 1M 上下文下的 V3.2：V4-Pro 只需 27% 的单 token FLOPs 与 10% 的 KV cache，V4-Flash 更进一步到 10% 与 7%。",
+          "formula": "\\frac{\\mathrm{FLOPs}_{\\text{V4-Pro}}}{\\mathrm{FLOPs}_{\\text{V3.2}}}=27\\%,\\quad \\frac{\\mathrm{KV}_{\\text{V4-Pro}}}{\\mathrm{KV}_{\\text{V3.2}}}=10\\%\\quad \\left(L=1\\mathrm{M}\\right)",
+          "vars": [
+            [
+              "27% / 10%",
+              "V4-Pro 相对 V3.2 的单 token FLOPs 与 KV 占比"
+            ],
+            [
+              "10% / 7%",
+              "V4-Flash 对应的两个比例"
+            ],
+            [
+              "L",
+              "上下文长度 1M"
+            ]
+          ]
+        }
+      ],
+      "confidence": "verified",
+      "sources": [
+        "https://arxiv.org/abs/2606.19348",
+        "https://ar5iv.labs.arxiv.org/html/2606.19348",
+        "https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro",
+        "https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro/raw/main/config.json"
+      ]
+    },
+    {
+      "id": "glm-5",
+      "name": "GLM-5",
+      "org": "Zhipu AI (Z.ai)",
+      "released": "2026-02",
+      "accent": "#a78bfa",
+      "paper": {
+        "title": "GLM-5: from Vibe Coding to Agentic Engineering",
+        "url": "https://arxiv.org/abs/2602.15763"
+      },
+      "summary": "GLM-5 把规模翻倍到 744B 总参 / 40B 激活（256 专家、80 层、hidden 6144），核心变化是用 DeepSeek Sparse Attention 替换稠密 MLA：32 头 ×128 维的 lightning indexer 为每个 query 选 top-2048 个 KV 再做注意力，长上下文算力降 1.5–2×。为了让 MLA 在 Muon 下不掉点，改用 MLA-256（head dim 256、头数减 1/3）与 Muon Split（按 head 切分再正交化），MTP 则用 3 层共享参数的 draft。",
+      "tags": [
+        "MoE",
+        "DSA",
+        "MLA",
+        "MTP"
+      ],
+      "stats": {
+        "total": "744B",
+        "active": "40B",
+        "layers": 80,
+        "context": "200K",
+        "experts": "256",
+        "topK": 8
+      },
+      "config": {
+        "layers": 80,
+        "dModel": 6144,
+        "heads": 64,
+        "kvHeads": "?",
+        "headDim": 192,
+        "experts": 256,
+        "shared": 1,
+        "topK": 8,
+        "vocab": 154880
+      },
+      "ideas": [
+        {
+          "title": "DSA 的 lightning indexer 打分",
+          "body": "indexer 是独立的轻量打分器：32 个 index head、每头 128 维，用 ReLU 而不是 softmax 得到每条历史 KV 的分数，再对每个 query 取 top-2048。它不改变注意力本身，只决定哪些 KV 参与后续计算，因此被作者称为无损的 token 级稀疏。",
+          "formula": "I_{t,s}=\\sum_{j=1}^{H_{I}}w_{t,j}\\cdot\\mathrm{ReLU}\\left(q_{t,j}\\cdot k_{s}\\right), S_{t}=\\mathrm{TopK}\\left(I_{t,:},k\\right)",
+          "vars": [
+            [
+              "H_{I}",
+              "indexer 头数 32"
+            ],
+            [
+              "w_{t,j}",
+              "第 j 个 index head 的权重"
+            ],
+            [
+              "k",
+              "每 query 保留的 KV 数 2048"
+            ],
+            [
+              "S_{t}",
+              "被选中的 KV 下标集合"
+            ]
+          ]
+        },
+        {
+          "title": "只在选中集合上做注意力",
+          "body": "对被 indexer 选中的 2048 个 KV 做标准 softmax 注意力，没被选中的 token 完全跳过，因此长上下文下注意力 FLOPs 与上下文长度近似解耦。选中的 top-k 必须用确定性算子，否则 RL 阶段训练与推理的 KV 选择不一致会导致熵崩塌。",
+          "formula": "o_{t}=\\sum_{s\\in S_{t}}\\frac{\\exp\\left(q_{t}^{\\top}k_{s}/\\sqrt{d}\\right)}{\\sum_{s'\\in S_{t}}\\exp\\left(q_{t}^{\\top}k_{s'}/\\sqrt{d}\\right)}v_{s}",
+          "vars": [
+            [
+              "S_{t}",
+              "indexer 选出的 KV 集合"
+            ],
+            [
+              "d",
+              "head 维度"
+            ],
+            [
+              "o_{t}",
+              "稀疏注意力的输出"
+            ]
+          ]
+        },
+        {
+          "title": "MLA-256：换 head 维度换解码算力",
+          "body": "MLA 解码时每个头要做 576 维的点积，比 GQA 的 128 维贵得多。GLM-5 把 V 头维从 128 提到 256、QK 头维从 128 提到 192，同时头数减少 1/3，保持训练算力与参数量不变却降低了解码算力；KV latent 仍是 512 维、Q latent 2048 维。",
+          "formula": "c_{t}^{KV}=W^{DKV}x_{t}\\in R^{512}, H=64, d_{QK}=192, d_{V}=256",
+          "vars": [
+            [
+              "c_{t}^{KV}",
+              "512 维 KV latent"
+            ],
+            [
+              "d_{QK}",
+              "QK 头维 192（GLM-4.5 为 128）"
+            ],
+            [
+              "d_{V}",
+              "V 头维 256（GLM-4.5 为 128）"
+            ],
+            [
+              "d_{Q}",
+              "query 的低秩维度 2048"
+            ]
+          ]
+        },
+        {
+          "title": "Muon Split：按 head 切分再正交化",
+          "body": "原本 Muon 对整块 up-projection 做 Newton–Schulz 正交化，不同 head 被迫共用同一更新尺度，576 维 latent 的 MLA 因此打不过 2048 维 KV 的 GQA-8。Muon Split 把 W^UQ、W^UK、W^UV 按 head 切成小块分别正交化，各 head 可以按自己的尺度更新，MLA 才追平 GQA-8，而且 attention logits 稳定到不再需要 QK-Clip。",
+          "formula": "W^{UQ}=\\left[W_{1}^{UQ},\\dots,W_{H}^{UQ}\\right], W_{h}^{UQ}\\leftarrow \\mathrm{NS}\\left(M_{h}\\right)\\sqrt{\\max\\left(n,m\\right)}\\cdot 0.2",
+          "vars": [
+            [
+              "W_{h}^{UQ}",
+              "第 h 个 head 的 up-projection 分块"
+            ],
+            [
+              "\\mathrm{NS}",
+              "Newton–Schulz 正交化"
+            ],
+            [
+              "H",
+              "头数 64"
+            ]
+          ]
+        },
+        {
+          "title": "三层 MTP 共享参数",
+          "body": "要预测未来 n 个 token 就得有 n 层 MTP，显存和 KV cache 随投机步数线性增长。GLM-5 让 3 层 MTP 共享同一套参数，显存与 DeepSeek-V3 的单层 MTP 相当，但训练目标覆盖 3 步，接受长度从 2.55 提到 2.76。",
+          "formula": "L_{\\mathrm{MTP}}=\\sum_{k=1}^{3}\\mathrm{CE}\\left(P_{\\theta}\\left(h_{i},t_{i+1:i+k}\\right),t_{i+k}\\right)",
+          "vars": [
+            [
+              "3",
+              "共享参数的 MTP 层数"
+            ],
+            [
+              "P_{\\theta}",
+              "共享参数的 MTP 头"
+            ],
+            [
+              "2.76",
+              "平均接受长度（DeepSeek-V3.2 为 2.55）"
+            ]
+          ]
+        }
+      ],
+      "confidence": "reported",
+      "sources": [
+        "https://arxiv.org/abs/2602.15763",
+        "https://arxiv.org/html/2602.15763",
+        "https://arxiv.org/abs/2512.02556"
+      ]
+    },
+    {
+      "id": "mimo-v2-flash",
+      "name": "MiMo-V2-Flash",
+      "org": "Xiaomi",
+      "released": "2026-01",
+      "accent": "#8b5cf6",
+      "paper": {
+        "title": "MiMo-V2-Flash Technical Report",
+        "url": "https://arxiv.org/abs/2601.02780"
+      },
+      "summary": "MiMo-V2-Flash 是 309B 总参数 / 15B 激活的 MoE，核心实验结论很反直觉：把 sliding window 压到 128 token、局部:全局做到 5:1，只要每个 head 配上可学习 attention sink，长上下文与推理反而不输全注意力。48 层里 39 层 SWA、9 层 global，SWA 用 8 个 KV head、global 只用 4 个，KV cache 约为全注意力的 1/6。它还把 MTP 做成 0.33B 的轻量 draft（dense FFN + SWA），三层 MTP 带来 3.6 的接受长度与 2.6× 解码加速。",
+      "tags": [
+        "MoE",
+        "hybrid SWA",
+        "attention sink",
+        "MTP",
+        "partial RoPE",
+        "FP8",
+        "Hybrid SWA"
+      ],
+      "stats": {
+        "total": "309B",
+        "active": "15B",
+        "layers": 48,
+        "context": "256K",
+        "experts": "256",
+        "topK": 8
+      },
+      "config": {
+        "layers": 48,
+        "dModel": 4096,
+        "heads": 64,
+        "kvHeads": 8,
+        "headDim": 192,
+        "experts": 256,
+        "shared": 0,
+        "topK": 8,
+        "vocab": 152576
+      },
+      "ideas": [
+        {
+          "title": "5:1 混合注意力与 128 token 窗口",
+          "body": "模型由 8 个 hybrid block 组成，每个 block 是 5 层 SWA 接 1 层 global attention；只有第一层例外，用 global + dense FFN 稳定早期表征。窗口仅 128，报告的解释是：窗口越小，SWA 越被迫只做局部建模，长程依赖被清晰交给 global 层，分工反而更干净。",
+          "formula": "\\mathrm{type}(l) = \\mathrm{SWA} \\text{ if } l \\ \\mathrm{mod}\\  6 \\in \\{1,2,3,4,5\\}, \\quad \\mathrm{type}(l) = \\mathrm{GA} \\text{ if } l \\ \\mathrm{mod}\\  6 = 0, \\quad W = 128",
+          "vars": [
+            [
+              "l",
+              "层索引，共 48 层（39 SWA + 9 GA）"
+            ],
+            [
+              "W",
+              "sliding window 宽度，128"
+            ],
+            [
+              "\\mathrm{GA}",
+              "global attention 层"
+            ]
+          ]
+        },
+        {
+          "title": "Attention sink 让 128 窗口不塌",
+          "body": "每个 head 学一个 sink 标量加进 softmax 分母；当局部窗口里没有有用信息时，模型可以把权重几乎全部给 sink，而不是被迫平均到 128 个无关 token 上。消融显示：不加 sink 的 128 窗口全面掉点，加了 sink 后在 MMLU/BBH/GPQA 上反超全注意力基线。",
+          "formula": "s_{ij} = \\frac{\\exp\\left(a_{ij} - m_{i}\\right)}{\\exp\\left(\\mathrm{sink} - m_{i}\\right) + \\sum_{j'}\\exp\\left(a_{ij'} - m_{i}\\right)}, \\quad a_{ij} = \\frac{q_{i} k_{j}^{\\top}}{\\sqrt{d}}",
+          "vars": [
+            [
+              "a_{ij}",
+              "query i 与窗口内 key j 的 logit"
+            ],
+            [
+              "\\mathrm{sink}",
+              "每个 head 的可学习 sink 偏置"
+            ],
+            [
+              "m_{i}",
+              "含 sink 的最大值，用于数值稳定"
+            ],
+            [
+              "d",
+              "head 维度"
+            ]
+          ]
+        },
+        {
+          "title": "局部与全局用不同数量的 KV head",
+          "body": "SWA 层用 64 个 query head 配 8 个 KV head，global 层只配 4 个 KV head。因为 global 层每 6 层才出现一次，长上下文下只有这 1/6 的层需要保存全序列 KV，其余层只存 128 token 的窗口，整体 KV cache 与 attention 计算降到约 1/6。",
+          "formula": "\\frac{M_{\\mathrm{KV}}^{\\mathrm{hybrid}}}{M_{\\mathrm{KV}}^{\\mathrm{full}}} \\approx \\frac{5}{6}\\cdot\\frac{W}{T} + \\frac{1}{6} \\quad \\text{for } T \\gg W",
+          "vars": [
+            [
+              "M_{\\mathrm{KV}}^{\\mathrm{hybrid}}",
+              "混合架构的 KV cache 占用"
+            ],
+            [
+              "M_{\\mathrm{KV}}^{\\mathrm{full}}",
+              "全注意力同规模基线"
+            ],
+            [
+              "W",
+              "sliding window 宽度，128"
+            ],
+            [
+              "T",
+              "序列长度，T ≫ W 时比值趋于 1/6"
+            ]
+          ]
+        },
+        {
+          "title": "只对前 64 维做 RoPE",
+          "body": "query/key 的 head 维度是 192，但只有前 64 维施加 RoPE，其余 128 维保持无位置。这与 Gemma 4 的 pp-RoPE 同源：位置信息只需要一个低维子空间承载，剩余维度留给内容匹配，同时减少旋转计算与位置外推时的失真。",
+          "formula": "\\mathrm{RoPE}\\left(q_{1:64}\\right), \\quad q_{65:192} \\text{ unchanged}; \\quad \\theta_{k} = b^{-2k/192},\\ b = 5\\times 10^{6}",
+          "vars": [
+            [
+              "q_{1:64}",
+              "参与旋转的前 64 维"
+            ],
+            [
+              "q_{65:192}",
+              "不做位置编码的维度"
+            ],
+            [
+              "b",
+              "RoPE base，5e6"
+            ],
+            [
+              "\\theta_{k}",
+              "第 k 维旋转频率"
+            ]
+          ]
+        },
+        {
+          "title": "轻量 MTP：dense FFN + SWA 的 draft 头",
+          "body": "MTP 块不用 MoE，也不用 global attention，而是 dense FFN + 128 窗口 SWA，单块只有 0.33B 参数。它在训练时提供多步预测的额外监督，在推理时直接当自投机解码的 draft：三层 MTP 把平均接受长度拉到 3.6，解码加速 2.6×。",
+          "formula": "\\mathcal{L}_{\\mathrm{MTP}} = -\\sum_{k=1}^{K} \\log p_{\\theta}\\left(y_{t+k} \\mid y_{\\le t}\\right), \\quad K = 3",
+          "vars": [
+            [
+              "K",
+              "MTP 预测的未来步数，3"
+            ],
+            [
+              "p_{\\theta}",
+              "MTP 头在第 k 步的预测分布"
+            ],
+            [
+              "y_{t+k}",
+              "未来第 k 个 token"
+            ]
+          ]
+        },
+        {
+          "title": "FP8 混合精度：router 留 FP32",
+          "body": "训练与推理用 FP8（e4m3）做主体矩阵乘，但 attention 的 o_proj、embedding、输出头保持 BF16，MoE router 全程 FP32。路由是 argmax 型决策，对精度极其敏感；把 FP32 留给 router 是这类 FP8 MoE 能稳定收敛的关键工程约束。",
+          "formula": "W_{\\mathrm{FP8}} = \\mathrm{round}_{\\mathrm{e4m3}}\\left(\\frac{W}{s_{b}}\\right), \\quad s_{b} = \\max\\left|W_{b}\\right| / 448, \\quad \\mathrm{router} \\in \\mathrm{FP32}",
+          "vars": [
+            [
+              "W_{b}",
+              "一个 128×128 block 内的权重"
+            ],
+            [
+              "s_{b}",
+              "逐 block 缩放因子"
+            ],
+            [
+              "448",
+              "e4m3 可表示的最大值"
+            ],
+            [
+              "\\mathrm{router}",
+              "门控投影，保持 FP32"
+            ]
+          ]
+        }
+      ],
+      "confidence": "verified",
+      "sources": [
+        "https://arxiv.org/abs/2601.02780",
+        "https://arxiv.org/html/2601.02780v2",
+        "https://huggingface.co/XiaomiMiMo/MiMo-V2-Flash"
+      ]
+    },
+    {
+      "id": "deepseek-v3-2",
+      "name": "DeepSeek-V3.2",
+      "org": "DeepSeek-AI",
+      "released": "2025-12",
+      "accent": "#4d6bfe",
+      "paper": {
+        "title": "DeepSeek-V3.2: Pushing the Frontier of Open Large Language Models",
+        "url": "https://arxiv.org/abs/2512.02556"
+      },
+      "summary": "V3.2 相对 V3.1-Terminus 的唯一架构改动是引入 DeepSeek Sparse Attention（DSA）：一个轻量 lightning indexer 为每个 query 给全部历史 token 打分，再只对 top-k（k=2048）个 KV 条目做注意力，把核心注意力复杂度从 O(L²) 降到 O(Lk)。主干仍是 671B/37B 的 MoE + MLA，DSA 以 MLA 的 MQA 模式实例化，即每个 512 维潜向量被所有 query 头共享。论文的另两项贡献在训练侧：可扩展的 GRPO 协议与大规模 agentic 数据合成流水线。",
+      "tags": [
+        "MoE",
+        "DSA",
+        "MLA",
+        "LightningIndexer",
+        "MTP"
+      ],
+      "stats": {
+        "total": "671B",
+        "active": "37B",
+        "layers": 61,
+        "context": "128K",
+        "experts": "256 routed + 1 shared",
+        "topK": 8
+      },
+      "config": {
+        "layers": 61,
+        "dModel": 7168,
+        "heads": 128,
+        "kvHeads": 128,
+        "headDim": 128,
+        "experts": 256,
+        "shared": 1,
+        "topK": 8,
+        "vocab": 129280,
+        "moeInter": 2048,
+        "kvLora": 512,
+        "ropeDim": 64,
+        "context": 131072
+      },
+      "stack": [
+        {
+          "id": "embed",
+          "label": "Token Embedding",
+          "sub": "129,280 × 7,168",
+          "kind": "io",
+          "shape": "[B, T] → [B, T, 7168]",
+          "desc": "词表 129,280 的嵌入矩阵；输出进入 61 层残差主干。"
+        },
+        {
+          "id": "block",
+          "label": "Transformer Block",
+          "sub": "MLA + DSA · DeepSeekMoE",
+          "kind": "repeat",
+          "count": 61,
+          "shape": "[B, T, 7168] → [B, T, 7168]",
+          "desc": "每层是「MLA 注意力 + MoE 前馈」两个子层，各自带 RMSNorm 与残差。",
+          "inner": [
+            {
+              "id": "in",
+              "label": "h  (残差流)",
+              "sub": "[B, T, 7168]",
+              "kind": "io",
+              "shape": "[B, T, 7168]",
+              "desc": "上一层输出的隐藏状态，也是两条残差捷径的起点。"
+            },
+            {
+              "id": "norm1",
+              "label": "RMSNorm",
+              "sub": "pre-norm",
+              "kind": "norm",
+              "shape": "[B, T, 7168]",
+              "desc": "Pre-Norm：归一化后再进注意力，训练更稳定。",
+              "formula": "\\mathrm{RMSNorm}(x)=\\frac{x}{\\sqrt{\\frac{1}{d}\\sum_{i=1}^{d}x_i^2+\\epsilon}}\\odot\\gamma"
+            },
+            {
+              "id": "mla",
+              "label": "MLA + DSA",
+              "sub": "低秩 KV 压缩 · top-k 稀疏注意力",
+              "kind": "attention",
+              "shape": "Q: [B,T,128,128] · KV cache: [B,T,576] per layer",
+              "desc": "查询/键值先投影到低秩潜空间，KV 只缓存 512 维潜向量 + 64 维 RoPE 键；DSA 再用 Lightning Indexer 为每个 query 选 top-k=2048 个历史 token 做精确注意力。",
+              "formula": "o_t=\\mathrm{softmax}\\left(\\frac{q_t k_{\\mathcal{S}_t}^{\\top}}{\\sqrt{d_h}}\\right)v_{\\mathcal{S}_t}"
+            },
+            {
+              "id": "res1",
+              "label": "Residual +",
+              "sub": "h ← h + Attn(Norm(h))",
+              "kind": "residual",
+              "shape": "[B, T, 7168]",
+              "desc": "注意力子层的残差回写。"
+            },
+            {
+              "id": "norm2",
+              "label": "RMSNorm",
+              "sub": "pre-norm",
+              "kind": "norm",
+              "shape": "[B, T, 7168]",
+              "desc": "MoE 子层前的归一化。"
+            },
+            {
+              "id": "moe",
+              "label": "DeepSeekMoE",
+              "sub": "256 routed + 1 shared · top-8",
+              "kind": "moe",
+              "shape": "[B, T, 7168] → [B, T, 7168]",
+              "desc": "细粒度专家路由：每个 token 激活 8 个路由专家（共 256 个）和 1 个共享专家，激活参数约 37B。",
+              "formula": "y=\\sum_{i\\in\\mathrm{TopK}}g_i\\,\\mathrm{FFN}_i(x)+\\mathrm{FFN}_{s}(x)"
+            },
+            {
+              "id": "res2",
+              "label": "Residual +",
+              "sub": "h ← h + MoE(Norm(h))",
+              "kind": "residual",
+              "shape": "[B, T, 7168]",
+              "desc": "MoE 子层的残差回写，输出进入下一层。"
+            }
+          ]
+        },
+        {
+          "id": "norm",
+          "label": "Final RMSNorm",
+          "sub": "7,168",
+          "kind": "norm",
+          "shape": "[B, T, 7168]",
+          "desc": "最终归一化后接 LM Head。"
+        },
+        {
+          "id": "head",
+          "label": "LM Head",
+          "sub": "7,168 × 129,280 · weight tied? 否",
+          "kind": "head",
+          "shape": "[B, T, 7168] → [B, T, 129,280]",
+          "desc": "输出词表 logits；训练时另有 MTP 头并行预测未来 token。"
+        },
+        {
+          "id": "mtp",
+          "label": "MTP Module",
+          "sub": "train-only · 1 step",
+          "kind": "head",
+          "shape": "[B, T, 7168] → [B, T, 129,280]",
+          "desc": "多 token 预测：把第 k 个未来 token 的表示与当前隐藏状态拼接后再预测，训练时提供更密集的监督信号；推理可丢弃。",
+          "formula": "\\mathcal{L}_{\\mathrm{MTP}}=\\sum_{k=1}^{K}\\lambda_k\\,\\mathcal{L}\\left(P(x_{t+k}\\mid x_{\\le t})\\right)"
+        }
+      ],
+      "ideas": [
+        {
+          "title": "Lightning Indexer 打分",
+          "body": "索引器是一个独立的极轻量打分头：只有 64 个索引头、每头 128 维，用 ReLU 而非 Softmax 做激活（为了吞吐），并可整体跑在 FP8 上。每个索引头有自己的权重 w，最后加权求和得到 query t 对历史 token s 的标量索引分。它只决定“看哪些”，不参与最终输出。",
+          "formula": "I_{t,s}=\\sum_{j=1}^{H^{I}}w_{t,j}^{I}\\cdot\\mathrm{ReLU}\\left(\\mathbf{q}_{t,j}^{I}\\cdot\\mathbf{k}_{s}^{I}\\right)",
+          "vars": [
+            [
+              "I_{t,s}",
+              "query t 对前序 token s 的索引分"
+            ],
+            [
+              "H^{I}",
+              "索引头数 = 64"
+            ],
+            [
+              "\\mathbf{q}_{t,j}^{I}",
+              "由 h_t 投影出的第 j 个索引 query，128 维"
+            ],
+            [
+              "\\mathbf{k}_{s}^{I}",
+              "由 h_s 投影出的索引 key，128 维"
+            ],
+            [
+              "w_{t,j}^{I}",
+              "第 j 个索引头的标量权重"
+            ]
+          ]
+        },
+        {
+          "title": "细粒度 top-k 选择",
+          "body": "得到索引分后，每个 query 只保留分数最高的 k 个 KV 条目（论文中 k=2048），注意力只在这些条目上计算。由于 KV 条目是 MLA 的 512 维潜向量，且按 MQA 模式被全部 128 个 query 头共享，选择粒度是 token 级而非头级，kernel 实现才高效。",
+          "formula": "\\mathbf{u}_t=\\mathrm{Attn}\\left(\\mathbf{h}_t,\\ \\left\\{\\mathbf{c}_s:\\ I_{t,s}\\in\\mathrm{TopK}\\left(I_{t,:},\\ k\\right)\\right\\}\\right),\\quad k=2048",
+          "vars": [
+            [
+              "\\mathbf{c}_s",
+              "MLA 的 KV 潜向量条目，跨所有 query 头共享"
+            ],
+            [
+              "k",
+              "每 query 选择的 KV 条目数 = 2048"
+            ],
+            [
+              "\\mathrm{TopK}",
+              "取索引分最高的 k 个位置"
+            ]
+          ]
+        },
+        {
+          "title": "索引器稠密热身（KL 对齐）",
+          "body": "随机初始化的索引器无法直接选出有用 token，所以先用一个短热身阶段：保持稠密注意力、冻结主模型全部参数，只训练索引器。目标是把主注意力分数按头求和、沿序列 L1 归一化得到目标分布 p，再用 KL 让索引器分布逼近它。只训 1000 步、每步 16 条 128K 序列，共 2.1B token，学习率 1e-3。",
+          "formula": "p_{t,:}=\\mathrm{L1Norm}\\left(\\sum_{h}\\mathrm{AttnScore}_{t,:}^{h}\\right),\\quad \\mathcal{L}^{I}=\\sum_{t}D_{\\mathrm{KL}}\\left(p_{t,:}\\ \\|\\ \\mathrm{Softmax}\\left(I_{t,:}\\right)\\right)",
+          "vars": [
+            [
+              "p_{t,:}",
+              "主注意力聚合后 L1 归一化的目标分布"
+            ],
+            [
+              "I_{t,:}",
+              "索引器对全部前序 token 的打分向量"
+            ],
+            [
+              "D_{\\mathrm{KL}}",
+              "KL 散度"
+            ],
+            [
+              "\\mathcal{L}^{I}",
+              "索引器专属损失"
+            ]
+          ]
+        },
+        {
+          "title": "稀疏阶段只在选中集合上对齐",
+          "body": "热身结束后引入 top-k 选择并解冻全部参数，索引器仍用 KL 对齐，但只在被选中的集合 S_t 上计算，使训练与推理的稀疏模式一致。关键细节是索引器输入被 detach：索引器只由 L^I 优化，主模型只由语言建模损失优化，两条梯度互不干扰。该阶段 15000 步、每步 480 条 128K 序列，共 943.7B token，学习率 7.3e-6。",
+          "formula": "\\mathcal{S}_t=\\left\\{s:\\ I_{t,s}\\in\\mathrm{TopK}\\left(I_{t,:},k\\right)\\right\\},\\quad \\mathcal{L}^{I}=\\sum_{t}D_{\\mathrm{KL}}\\left(p_{t,\\mathcal{S}_t}\\ \\|\\ \\mathrm{Softmax}\\left(I_{t,\\mathcal{S}_t}\\right)\\right)",
+          "vars": [
+            [
+              "\\mathcal{S}_t",
+              "query t 选中的 token 集合"
+            ],
+            [
+              "p_{t,\\mathcal{S}_t}",
+              "目标分布在选中集合上的切片"
+            ],
+            [
+              "15000 步 / 943.7B token",
+              "稀疏训练阶段规模"
+            ]
+          ]
+        },
+        {
+          "title": "复杂度从二次降到线性",
+          "body": "主注意力的计算量随序列长度从 O(L²) 降为 O(Lk)，k 远小于 L 且与 L 无关。索引器本身仍是 O(L²)，但它只有 64 个 128 维头且可跑 FP8，开销远小于 MLA 的 128 个 192 维头。论文在 H800 上的实测显示长上下文 prefill 与 decode 的单 token 成本都显著下降。",
+          "formula": "\\mathcal{O}\\left(L^{2}\\right)\\ \\longrightarrow\\ \\mathcal{O}\\left(Lk\\right),\\quad k=2048\\ll L,\\quad \\text{indexer cost}\\ll\\text{MLA cost}",
+          "vars": [
+            [
+              "L",
+              "上下文长度"
+            ],
+            [
+              "k",
+              "选中条目数 2048"
+            ],
+            [
+              "O(Lk)",
+              "主注意力复杂度"
+            ]
+          ]
+        },
+        {
+          "title": "DSA 以 MLA 的 MQA 模式实例化",
+          "body": "为了让 kernel 高效，被选中的 KV 条目必须在多个 query 头间共享，因此 DSA 采用 MLA 的 MQA 模式而非 MHA 模式：每条潜向量 c_s 同时服务该 token 的全部 query 头。MLA 本身仍保留 512+64 的缓存结构，所以 DSA 是在原有低秩缓存之上再加一层稀疏选择，而不是替换 MLA。",
+          "formula": "\\mathbf{c}_s\\ \\text{shared by all}\\ n_h=128\\ \\text{query heads},\\quad \\mathrm{cache}_s=\\mathbf{c}_s^{KV}\\left(512\\right)\\oplus\\mathbf{k}_s^{R}\\left(64\\right)",
+          "vars": [
+            [
+              "n_h",
+              "query 头数 = 128"
+            ],
+            [
+              "\\mathbf{c}_s^{KV}",
+              "512 维 KV 潜向量"
+            ],
+            [
+              "\\mathbf{k}_s^{R}",
+              "64 维解耦 RoPE 键"
+            ]
+          ]
+        },
+        {
+          "title": "GRPO 的无偏 KL 估计",
+          "body": "原始 K3 估计量在 π_θ 远小于 π_ref 时会给这些 token 分配无界权重，导致梯度噪声累积。V3.2 用 π_θ/π_old 的重要性比值修正 K3，使 KL 梯度无偏，从而支撑 RL 规模扩大（后训练算力超过预训练的 10%）。不同领域对 KL 强度需求不同，数学等领域甚至可以不用 KL。",
+          "formula": "D_{\\mathrm{KL}}=\\frac{\\pi_{\\theta}\\left(o_{i,t}\\right)}{\\pi_{\\mathrm{old}}\\left(o_{i,t}\\right)}\\left(\\frac{\\pi_{\\mathrm{ref}}\\left(o_{i,t}\\right)}{\\pi_{\\theta}\\left(o_{i,t}\\right)}-\\log\\frac{\\pi_{\\mathrm{ref}}\\left(o_{i,t}\\right)}{\\pi_{\\theta}\\left(o_{i,t}\\right)}-1\\right)",
+          "vars": [
+            [
+              "\\pi_{\\theta}",
+              "当前策略"
+            ],
+            [
+              "\\pi_{\\mathrm{old}}",
+              "采样策略"
+            ],
+            [
+              "\\pi_{\\mathrm{ref}}",
+              "参考策略"
+            ],
+            [
+              "o_{i,t}",
+              "第 i 条回答的第 t 个 token"
+            ]
+          ]
+        }
+      ],
+      "confidence": "verified",
+      "sources": [
+        "https://arxiv.org/abs/2512.02556",
+        "https://arxiv.org/html/2512.02556v1",
+        "https://huggingface.co/deepseek-ai/DeepSeek-V3.2",
+        "https://huggingface.co/deepseek-ai/DeepSeek-V3.2/raw/main/config.json"
+      ]
+    },
+    {
+      "id": "qwen3-next",
+      "name": "Qwen3-Next-80B-A3B",
+      "org": "Alibaba Qwen",
+      "released": "2025-09",
+      "accent": "#f472b6",
+      "paper": {
+        "title": "Qwen3-Next-80B-A3B-Instruct Model Card",
+        "url": "https://huggingface.co/Qwen/Qwen3-Next-80B-A3B-Instruct"
+      },
+      "summary": "Qwen3-Next 用 3:1 的混合层替换标准注意力：每 3 层 Gated DeltaNet（带通道级衰减的门控 delta 规则线性注意力）接 1 层 Gated Attention，48 层里只有 12 层做全注意力，因此 256K 上下文仍保持近线性开销。MoE 稀疏到 512 选 10 再加 1 个共享专家，80B 总参只激活 3B；并用 MTP、QK-Norm、零中心 weight-decay LayerNorm 保证 15T token 预训练稳定。",
+      "tags": [
+        "Hybrid",
+        "MoE",
+        "Linear Attention",
+        "MTP",
+        "GQA"
+      ],
+      "stats": {
+        "total": "80B",
+        "active": "3B",
+        "layers": 48,
+        "context": "256K",
+        "experts": "512",
+        "topK": 10
+      },
+      "config": {
+        "layers": 48,
+        "dModel": 2048,
+        "heads": 16,
+        "kvHeads": 2,
+        "headDim": 256,
+        "experts": 512,
+        "shared": 1,
+        "topK": 10,
+        "vocab": 151936,
+        "context": 262144,
+        "kvLayers": 12
+      },
+      "ideas": [
+        {
+          "title": "3:1 混合注意力主干",
+          "body": "48 层被切成 12 个重复块，每块 3 层 Gated DeltaNet 加 1 层 Gated Attention，两种层后面都接 MoE。只有四分之一的层保留 softmax 全注意力，其余用线性注意力做 token 混合，所以 KV cache 只随 12 个全注意力层增长，32K 以上上下文的吞吐约为同规模稠密模型的 10 倍。",
+          "formula": "\\text{block} = 3\\times\\left(\\text{Gated DeltaNet}\\rightarrow \\mathrm{MoE}\\right) \\rightarrow 1\\times\\left(\\text{Gated Attention}\\rightarrow \\mathrm{MoE}\\right)",
+          "vars": [
+            [
+              "3:1",
+              "线性注意力层与全注意力层的比例"
+            ],
+            [
+              "12",
+              "重复块数，12 × 4 = 48 层"
+            ],
+            [
+              "1/4",
+              "全注意力层占比，决定 KV cache 规模"
+            ]
+          ]
+        },
+        {
+          "title": "Gated DeltaNet 的 delta 规则递推",
+          "body": "每个 token 先用通道级门 α_t 衰减整个状态矩阵，再用 rank-1 的 delta 修正写入 v_t k_t^T，等价于对 \\|S k_t - v_t\\|^2 做一步梯度下降，因此既能快速遗忘也能精确改写成对记忆。Qwen3-Next 的线性注意力用 32 个 V head、16 个 QK head，head_dim 128。",
+          "formula": "S_{t}=S_{t-1}\\left(\\alpha_{t}\\left(I-\\beta_{t}k_{t}k_{t}^{\\top}\\right)\\right)+\\beta_{t}v_{t}k_{t}^{\\top}, o_{t}=S_{t}^{\\top}q_{t}",
+          "vars": [
+            [
+              "S_{t}",
+              "循环状态矩阵，形状 d_k × d_v"
+            ],
+            [
+              "\\alpha_{t}",
+              "通道级遗忘门，取值 (0,1)"
+            ],
+            [
+              "\\beta_{t}",
+              "delta 写入强度，取值 (0,1)"
+            ],
+            [
+              "k_{t}, v_{t}, q_{t}",
+              "当前 token 的 key、value、query"
+            ],
+            [
+              "o_{t}",
+              "线性注意力输出"
+            ]
+          ]
+        },
+        {
+          "title": "Gated Attention：SDPA 输出后的 sigmoid 门",
+          "body": "在 softmax 注意力输出后再乘一个 head-specific 的 sigmoid 门，门由输入线性投影得到，等于给每个通道一个数据相关的缩放。256 维的头里只对前 64 维（partial_rotary_factor = 0.25）加 RoPE，其余维度不携带显式位置信息。",
+          "formula": "Y' = Y\\odot\\sigma\\left(X\\theta\\right), Y=\\mathrm{softmax}\\left(\\frac{QK^{\\top}}{\\sqrt{d}}\\right)V",
+          "vars": [
+            [
+              "Y",
+              "Scaled Dot-Product Attention 的原始输出"
+            ],
+            [
+              "X",
+              "pre-norm 后的隐状态"
+            ],
+            [
+              "\\theta",
+              "每个 head 独立的门控参数"
+            ],
+            [
+              "\\sigma",
+              "sigmoid 函数"
+            ],
+            [
+              "\\odot",
+              "逐元素乘"
+            ]
+          ]
+        },
+        {
+          "title": "门控如何消掉 attention sink",
+          "body": "未加门的基线会把平均 46.7% 的注意力分给第一个 token（个别层高达 83%），因为 softmax 必须归一化，模型就把无处安放的注意力倒进初始 token。加门之后这个比例降到 4.8%（该层降到 4%），等效于允许模型把某个通道整体关掉，而不是靠 sink 吸收冗余概率。",
+          "formula": "o_{t}=\\frac{\\sum_{s\\le t}\\exp\\left(z_{t,s}\\right)v_{s}}{\\sum_{s\\le t}\\exp\\left(z_{t,s}\\right)+\\exp\\left(z_{\\mathrm{sink}}\\right)}",
+          "vars": [
+            [
+              "z_{t,s}",
+              "query t 对 key s 的注意力 logit"
+            ],
+            [
+              "z_{\\mathrm{sink}}",
+              "汇点（初始 token）的等效 logit"
+            ],
+            [
+              "46.7% → 4.8%",
+              "门控前后首 token 分到的注意力比例"
+            ]
+          ]
+        },
+        {
+          "title": "超高稀疏 MoE：512 选 10 加共享专家",
+          "body": "每层 512 个路由专家只激活 10 个，另有 1 个始终生效的共享专家，专家中间维只有 512，激活比约 3B/80B = 3.75%。路由分数在选中的 top-k 内归一化后再加权求和，共享专家负责承载所有 token 都要用的通用变换。",
+          "formula": "y=\\sum_{i\\in\\mathrm{TopK}\\left(s\\right)}g_{i}E_{i}\\left(x\\right)+E_{\\mathrm{shared}}\\left(x\\right), g_{i}=\\frac{s_{i}}{\\sum_{j\\in\\mathrm{TopK}}s_{j}}",
+          "vars": [
+            [
+              "E_{i}",
+              "第 i 个路由专家（FFN）"
+            ],
+            [
+              "E_{\\mathrm{shared}}",
+              "共享专家，不参与路由"
+            ],
+            [
+              "g_{i}",
+              "归一化后的路由权重"
+            ],
+            [
+              "3.75%",
+              "激活参数占总参数比例"
+            ]
+          ]
+        },
+        {
+          "title": "MTP：一次预测多个未来 token",
+          "body": "在主干的最后一层隐状态上接一个轻量 MTP 头，同时预测未来 N 个 token，预训练时作为加权辅助损失，推理时可当作投机解码的 draft 模型提高吞吐。Qwen3-Next 用它提升预训练效果并加速解码。",
+          "formula": "L_{\\mathrm{MTP}}=\\frac{\\lambda}{N}\\sum_{k=1}^{N}\\mathrm{CE}\\left(P_{k},t_{i+k}\\right)",
+          "vars": [
+            [
+              "N",
+              "一次预测的未来 token 数"
+            ],
+            [
+              "P_{k}",
+              "第 k 步的预测分布"
+            ],
+            [
+              "\\lambda",
+              "MTP 损失权重"
+            ],
+            [
+              "\\mathrm{CE}",
+              "交叉熵"
+            ]
+          ]
+        },
+        {
+          "title": "QK-Norm 压住注意力 logits",
+          "body": "每个 head 的 query 和 key 在点积前先做 RMSNorm 再乘可学习缩放，使 logits 量级不随 hidden size 和训练步数漂移。配合零中心、带 weight decay 的 LayerNorm，这是 15T token 预训练不出现 loss spike 的关键稳定性设计之一。",
+          "formula": "q\\leftarrow\\frac{q}{\\sqrt{\\frac{1}{d}\\sum_{j}q_{j}^{2}}}\\odot\\gamma_{q}, k\\leftarrow\\frac{k}{\\sqrt{\\frac{1}{d}\\sum_{j}k_{j}^{2}}}\\odot\\gamma_{k}",
+          "vars": [
+            [
+              "d",
+              "每个 head 的维度"
+            ],
+            [
+              "\\gamma_{q},\\gamma_{k}",
+              "可学习的逐维缩放"
+            ],
+            [
+              "q,k",
+              "归一化前的 query、key"
+            ]
+          ]
+        }
+      ],
+      "confidence": "verified",
+      "sources": [
+        "https://huggingface.co/Qwen/Qwen3-Next-80B-A3B-Instruct",
+        "https://huggingface.co/Qwen/Qwen3-Next-80B-A3B-Instruct/blob/main/config.json",
+        "https://arxiv.org/abs/2412.06464",
+        "https://arxiv.org/abs/2505.06708"
+      ],
+      "stack": [
+        {
+          "id": "embed",
+          "label": "Token Embedding",
+          "sub": "151,936 × 2,048",
+          "kind": "io",
+          "shape": "[B, T] → [B, T, 2048]",
+          "desc": "词表 151,936。"
+        },
+        {
+          "id": "hybrid",
+          "label": "Hybrid Block",
+          "sub": "3 × Gated DeltaNet + 1 × Gated Attention",
+          "kind": "repeat",
+          "count": 48,
+          "shape": "[B, T, 2048] → [B, T, 2048]",
+          "desc": "48 层按 3:1 交替：前 3 层是线性注意力的 Gated DeltaNet，第 4 层是带输出门的全注意力。",
+          "inner": [
+            {
+              "id": "in",
+              "label": "h  (残差流)",
+              "sub": "[B, T, 2048]",
+              "kind": "io",
+              "shape": "[B, T, 2048]",
+              "desc": "隐藏状态。"
+            },
+            {
+              "id": "dn",
+              "label": "Gated DeltaNet",
+              "sub": "线性注意力 · 常数状态",
+              "kind": "attention",
+              "shape": "state: [heads, d_k, d_v] · O(1) per token",
+              "desc": "DeltaNet 用可学习的衰减 α 和写入门 β 更新一个矩阵状态 S；每个 token 只需 O(1) 状态读写，不用保存完整 KV cache。",
+              "formula": "S_t=S_{t-1}\\left(\\alpha_t\\left(I-\\beta_t k_t k_t^{\\top}\\right)\\right)+\\beta_t v_t k_t^{\\top}"
+            },
+            {
+              "id": "res1",
+              "label": "Residual +",
+              "sub": "h ← h + DN(Norm(h))",
+              "kind": "residual",
+              "shape": "[B, T, 2048]",
+              "desc": "线性注意力残差。"
+            },
+            {
+              "id": "norm2",
+              "label": "Zero-centered RMSNorm",
+              "sub": "γ 初始化为 0",
+              "kind": "norm",
+              "shape": "[B, T, 2048]",
+              "desc": "权重以 0 为中心初始化，等价于 (1+γ) 缩放，缓解深层网络的激活爆炸。",
+              "formula": "y=\\frac{x}{\\sqrt{\\frac{1}{d}\\sum_i x_i^2+\\epsilon}}\\odot\\left(1+\\gamma\\right)"
+            },
+            {
+              "id": "ga",
+              "label": "Gated Attention",
+              "sub": "每 4 层一次 · 输出门控",
+              "kind": "attention",
+              "shape": "Q: [B,T,16,128] · KV: [B,T,2,128]",
+              "desc": "标准 softmax 注意力（GQA 2 个 KV 头），但输出再乘一个 sigmoid 门，抑制无关 token 的写回。",
+              "formula": "o_t=\\sigma\\left(W_g x_t\\right)\\odot\\mathrm{Attn}\\left(q_t,K,V\\right)"
+            },
+            {
+              "id": "res2",
+              "label": "Residual +",
+              "sub": "h ← h + GA(Norm(h))",
+              "kind": "residual",
+              "shape": "[B, T, 2048]",
+              "desc": "全注意力残差。"
+            },
+            {
+              "id": "moe",
+              "label": "Ultra-sparse MoE",
+              "sub": "512 experts · top-10",
+              "kind": "moe",
+              "shape": "[B, T, 2048] → [B, T, 2048]",
+              "desc": "512 个路由专家，每个 token 激活 10 个；3B 激活参数支撑 80B 总容量。",
+              "formula": "y=\\sum_{i\\in\\mathrm{TopK}}g_i\\,\\mathrm{FFN}_i(x)"
+            },
+            {
+              "id": "res3",
+              "label": "Residual +",
+              "sub": "h ← h + MoE(Norm(h))",
+              "kind": "residual",
+              "shape": "[B, T, 2048]",
+              "desc": "MoE 残差。"
+            }
+          ]
+        },
+        {
+          "id": "norm",
+          "label": "Final Norm",
+          "sub": "2,048",
+          "kind": "norm",
+          "shape": "[B, T, 2048]",
+          "desc": "最终归一化。"
+        },
+        {
+          "id": "head",
+          "label": "LM Head + MTP",
+          "sub": "2,048 × 151,936",
+          "kind": "head",
+          "shape": "[B, T, 2048] → [B, T, 151,936]",
+          "desc": "主 LM Head 与多 token 预测头。"
+        }
+      ]
+    },
+    {
+      "id": "longcat-flash",
+      "name": "LongCat-Flash",
+      "org": "Meituan",
+      "released": "2025-09",
+      "accent": "#6d8cff",
+      "paper": {
+        "title": "LongCat-Flash Technical Report",
+        "url": "https://arxiv.org/abs/2509.01322"
+      },
+      "summary": "LongCat-Flash 是 560B 总参数的 MoE，但每 token 只激活 18.6B–31.3B（均值 27B），因为它在 512 个 FFN 专家之外又加了 256 个 zero-computation experts：这些“专家”直接返回输入、零计算，路由选中它们就等于跳过计算。专家偏置由 PID 控制器调节，把平均激活专家数锁在期望值附近，同时允许单 token 的计算量上下浮动，实现上下文相关的动态算力。另一个设计是 Shortcut-connected MoE，把上一层 dense FFN 与当前 MoE 的 dispatch/combine 通信重叠，扩大计算-通信重叠窗口。",
+      "tags": [
+        "MoE",
+        "zero-computation experts",
+        "ScMoE",
+        "PID control",
+        "MLA",
+        "load balancing"
+      ],
+      "stats": {
+        "total": "560B",
+        "active": "27B",
+        "layers": 28,
+        "context": "128K",
+        "experts": "512",
+        "topK": 12
+      },
+      "config": {
+        "layers": 28,
+        "dModel": 6144,
+        "heads": 64,
+        "kvHeads": 1,
+        "headDim": 192,
+        "experts": 512,
+        "shared": 0,
+        "topK": 12,
+        "vocab": 131072,
+        "kvLora": 512,
+        "ropeDim": 64
+      },
+      "ideas": [
+        {
+          "title": "零计算专家：把“跳过”变成一个专家",
+          "body": "在 N 个真实 FFN 专家之外增加 Z 个 identity 专家，它们不做任何矩阵乘，只把输入原样返回。路由器在 N+Z 个候选里选 top-K，选中 identity 专家的名额就等价于跳过相应次数的 FFN 计算，于是同一个模型可以对难 token 多算、对易 token 少算，而不需要分支或提前退出。",
+          "formula": "\\mathrm{MoE}(x_{t}) = \\sum_{i=1}^{N+Z} g_{i} E_{i}(x_{t}), \\quad E_{i}(x_{t}) = \\mathrm{FFN}_{i}(x_{t}) \\text{ if } i \\le N, \\quad E_{i}(x_{t}) = x_{t} \\text{ if } i > N",
+          "vars": [
+            [
+              "N",
+              "真实 FFN 专家数，512"
+            ],
+            [
+              "Z",
+              "零计算专家数，256"
+            ],
+            [
+              "g_{i}",
+              "路由权重，未被选中时为 0"
+            ],
+            [
+              "x_{t}",
+              "第 t 个 token 的 MoE 输入"
+            ]
+          ]
+        },
+        {
+          "title": "PID 式专家偏置控制平均算力",
+          "body": "为了让平均激活专家数收敛到目标 K_e（约 8 个 FFN 专家），每个真实专家维护一个只随负载更新的偏置 b_i，增量正比于“目标份额减去实际份额”。这是把控制论的 PID 思想用在路由上：偏置不进入 LM 损失，因此不会像 aux loss 那样干扰语言建模目标，但能把算力预算稳定住。",
+          "formula": "\\Delta b_{i} = \\mu\\left(\\frac{K_{e}}{K} \\cdot \\frac{1}{N} - \\frac{T_{i}}{K\\,T_{\\mathrm{all}}}\\right), \\quad 1 \\le i \\le N",
+          "vars": [
+            [
+              "\\mu",
+              "偏置更新速率"
+            ],
+            [
+              "K",
+              "每 token 选择的专家总数，12"
+            ],
+            [
+              "K_{e}",
+              "期望的真实 FFN 专家数，约 8"
+            ],
+            [
+              "T_{i}",
+              "被路由到专家 i 的 token 数"
+            ],
+            [
+              "T_{\\mathrm{all}}",
+              "全局 batch 的 token 总数"
+            ]
+          ]
+        },
+        {
+          "title": "为 identity 专家单独设组的分组负载均衡",
+          "body": "设备级负载均衡损失把所有零计算专家归入额外一组（第 D+1 组），并让 FFN 组与 identity 组的频率各自归一化。这样既防止 EP 组间出现极端不均衡，又不会因为 identity 专家天然“抢流量”而把真实专家饿死。",
+          "formula": "\\mathcal{L}_{\\mathrm{LB}} = \\alpha \\sum_{j=1}^{D+1} f_{j} P_{j}, \\quad P_{j} = \\frac{1}{T}\\sum_{i \\in \\mathrm{Group}_{j}} \\sum_{t=1}^{T} R(x_{t})_{i}",
+          "vars": [
+            [
+              "D",
+              "FFN 专家的组数"
+            ],
+            [
+              "f_{j}",
+              "第 j 组被选中的频率"
+            ],
+            [
+              "P_{j}",
+              "第 j 组 router 概率均值"
+            ],
+            [
+              "\\alpha",
+              "负载均衡系数"
+            ],
+            [
+              "R(x_{t})",
+              "softmax router 输出"
+            ]
+          ]
+        },
+        {
+          "title": "Shortcut-connected MoE：把通信藏进计算",
+          "body": "每层有两个 MLA 与多组异构 FFN，第一条 MLA 的输出直接短路进 MoE 块；上一层留下的 dense FFN 与当前 MoE 的 all-to-all dispatch/combine 并行执行。相比“单个共享专家”能提供的重叠窗口，这相当于把可重叠的计算量放大到一整个 FFN，训练与推理吞吐因此提升。",
+          "formula": "h = \\mathrm{MLA}_{1}(x), \\quad y = h + \\mathrm{MoE}(h) + \\mathrm{FFN}_{\\mathrm{dense}}(h)",
+          "vars": [
+            [
+              "\\mathrm{MLA}_{1}",
+              "第一个多头潜在注意力块"
+            ],
+            [
+              "\\mathrm{MoE}(h)",
+              "含零计算专家的稀疏 FFN"
+            ],
+            [
+              "\\mathrm{FFN}_{\\mathrm{dense}}",
+              "与 MoE 通信重叠执行的稠密 FFN"
+            ]
+          ]
+        },
+        {
+          "title": "路由输出整体缩放",
+          "body": "被选专家的加权输出在加回残差流前统一乘以 routed_scaling_factor（6.0）。由于 top-12 中通常只有约 8 个真实专家贡献数值，这个系数把稀疏组合的方差拉回与稠密层相同的量级，避免深层残差流被 MoE 输出主导。",
+          "formula": "y = \\gamma \\sum_{i \\in \\mathrm{TopK}} g_{i} E_{i}(x), \\quad \\gamma = 6.0",
+          "vars": [
+            [
+              "\\gamma",
+              "routed_scaling_factor，6.0"
+            ],
+            [
+              "g_{i}",
+              "归一化后的路由权重"
+            ],
+            [
+              "E_{i}(x)",
+              "专家输出（identity 专家时为 x）"
+            ]
+          ]
+        }
+      ],
+      "confidence": "verified",
+      "sources": [
+        "https://arxiv.org/abs/2509.01322",
+        "https://arxiv.org/html/2509.01322v1",
+        "https://huggingface.co/meituan-longcat/LongCat-Flash-Chat"
+      ]
+    },
+    {
+      "id": "gpt-oss-120b",
+      "name": "gpt-oss-120b",
+      "org": "OpenAI",
+      "released": "2025-08",
+      "accent": "#4ade80",
+      "paper": {
+        "title": "gpt-oss-120b & gpt-oss-20b Model Card",
+        "url": "https://arxiv.org/abs/2508.10925"
+      },
+      "summary": "gpt-oss 是 OpenAI 的开放权重 MoE 推理模型：120b 版 36 层、116.8B 总参数、5.1B 激活，128 个专家每 token 选 4 个。架构上最值得注意的是每个 attention head 在 softmax 分母里带一个可学习的 sink bias，使模型可以选择“不看任何 token”，这让 banded window（128）与 dense 层交替的局部/全局混合真正可用。权重以 MXFP4 后训练量化，约 4.25 bit/参数，使 120b 能塞进单张 80GB GPU。",
+      "tags": [
+        "MoE",
+        "attention sink",
+        "MXFP4",
+        "YaRN",
+        "GQA",
+        "sliding window"
+      ],
+      "stats": {
+        "total": "116.8B",
+        "active": "5.1B",
+        "layers": 36,
+        "context": "131072",
+        "experts": "128",
+        "topK": 4
+      },
+      "config": {
+        "layers": 36,
+        "dModel": 2880,
+        "heads": 64,
+        "kvHeads": 8,
+        "headDim": 64,
+        "experts": 128,
+        "shared": 0,
+        "topK": 4,
+        "vocab": 201088
+      },
+      "ideas": [
+        {
+          "title": "可学习 attention sink",
+          "body": "每个 head 在 softmax 分母中额外加一个可学习标量 sink，等价于在序列末尾追加一个恒为 0 logit 的虚拟 token。模型因此可以把注意力“全部倒掉”而不必强行分配到真实 token 上，这是超小窗口（128）下仍能维持长程能力的关键。",
+          "formula": "s_{ij} = \\frac{\\exp\\left(a_{ij} - m_{i}\\right)}{\\exp\\left(\\mathrm{sink} - m_{i}\\right) + \\sum_{j'}\\exp\\left(a_{ij'} - m_{i}\\right)}, \\quad m_{i} = \\max\\left(\\max_{j} a_{ij},\\ \\mathrm{sink}\\right)",
+          "vars": [
+            [
+              "a_{ij}",
+              "query i 与 key j 的缩放点积 logit"
+            ],
+            [
+              "\\mathrm{sink}",
+              "每个 head 独立学习的 sink 偏置"
+            ],
+            [
+              "m_{i}",
+              "含 sink 的数值稳定最大值"
+            ],
+            [
+              "s_{ij}",
+              "归一化后的注意力权重，总和小于 1"
+            ]
+          ]
+        },
+        {
+          "title": "128 带宽窗与全注意力交替",
+          "body": "attention 层在 banded（局部带状）与 fully dense 两种模式间交替，带宽仅 128 token。局部层负责近邻语法与实体绑定，dense 层负责跨段落整合，形成显式的局部/全局分工。",
+          "formula": "\\mathrm{mask}^{(l)}_{ij} = \\mathbb{I}\\left(|i - j| < 128\\right) \\text{ for banded layers}, \\quad \\mathrm{mask}^{(l)}_{ij} = 1 \\text{ for dense layers}",
+          "vars": [
+            [
+              "\\mathrm{mask}^{(l)}_{ij}",
+              "第 l 层位置 i 对 j 的可见性掩码"
+            ],
+            [
+              "\\mathbb{I}(\\cdot)",
+              "指示函数"
+            ],
+            [
+              "128",
+              "banded 层的窗口带宽（token 数）"
+            ]
+          ]
+        },
+        {
+          "title": "Top-4 路由，只在选中专家上归一化",
+          "body": "128 个专家中取 router 得分最高的 4 个，softmax 只在被选中的 4 个 logits 上重归一化，而不是对全部 128 个归一化。这让路由权重之和恒为 1，专家输出尺度不随专家总数漂移，也让 top-k 改变时无需重调缩放。",
+          "formula": "g_{i} = \\frac{\\exp\\left(s_{i}\\right)}{\\sum_{j \\in \\mathrm{TopK}} \\exp\\left(s_{j}\\right)}, \\quad y = \\sum_{i \\in \\mathrm{TopK}} g_{i} E_{i}(x), \\quad s = W_{r} x",
+          "vars": [
+            [
+              "s_{i}",
+              "router 对第 i 个专家的打分"
+            ],
+            [
+              "\\mathrm{TopK}",
+              "得分最高的 4 个专家集合"
+            ],
+            [
+              "g_{i}",
+              "仅在被选专家上归一化的路由权重"
+            ],
+            [
+              "E_{i}(x)",
+              "第 i 个 SwiGLU 专家"
+            ]
+          ]
+        },
+        {
+          "title": "MXFP4：4.25 bit 的专家权重",
+          "body": "MoE 权重（占总参数 90% 以上）在 post-training 阶段量化为 MXFP4：每 32 个权重共享一个 E8M0 指数，权重为 4 bit 尾数，实际 4.25 bit/参数。attention 与 embedding 保持高精度，因此 120b 检查点只有 60.8GiB。",
+          "formula": "w = s \\cdot q, \\quad s = 2^{\\,e - 127}, \\quad q \\in \\{-8, \\ldots, 7\\}, \\quad \\text{bits/param} = 4 + \\frac{8}{32} = 4.25",
+          "vars": [
+            [
+              "w",
+              "反量化后的权重"
+            ],
+            [
+              "s",
+              "每 32 个权重共享的 block scale（E8M0 指数）"
+            ],
+            [
+              "q",
+              "4 bit 整数量化值"
+            ],
+            [
+              "e",
+              "8 bit 共享指数"
+            ]
+          ]
+        },
+        {
+          "title": "GQA：64 个 query head 只配 8 个 KV head",
+          "body": "每个 head 维度 64，query head 64 个而 KV head 只有 8 个，KV cache 直接降到 1/8。在 131072 上下文下，这一比例比任何注意力稀疏化都更直接地决定显存上限。",
+          "formula": "M_{\\mathrm{KV}} = 2 \\cdot L \\cdot n_{kv} \\cdot d_{h} \\cdot T \\cdot b, \\quad \\frac{M_{\\mathrm{KV}}}{M_{\\mathrm{MHA}}} = \\frac{n_{kv}}{n_{h}} = \\frac{8}{64} = \\frac{1}{8}",
+          "vars": [
+            [
+              "L",
+              "层数，36"
+            ],
+            [
+              "n_{kv}",
+              "KV head 数，8"
+            ],
+            [
+              "n_{h}",
+              "query head 数，64"
+            ],
+            [
+              "d_{h}",
+              "head 维度，64"
+            ],
+            [
+              "T",
+              "序列长度"
+            ],
+            [
+              "b",
+              "每元素字节数"
+            ]
+          ]
+        },
+        {
+          "title": "带 clamp 的 SwiGLU 与残差式门控",
+          "body": "OpenAI 的 SwiGLU 并非常规写法：gate 与 up 分支都被截断在 ±7，sigmoid 内部再乘 1.702（SiLU 的标准近似系数），最后 up 分支加 1 形成一条近似恒等的旁路。截断抑制了 SwiGLU 在低精度下的激活爆炸，+1 旁路则让专家在需要时可以近似退化为线性变换。",
+          "formula": "\\mathrm{FFN}(x) = \\left(\\mathrm{clamp}\\left(xW_{3}, -7, 7\\right) + 1\\right) \\odot \\mathrm{clamp}\\left(xW_{1}, -\\infty, 7\\right) \\odot \\sigma\\left(1.702 \\cdot \\mathrm{clamp}\\left(xW_{1}, -\\infty, 7\\right)\\right)",
+          "vars": [
+            [
+              "W_{1}",
+              "gate 分支投影"
+            ],
+            [
+              "W_{3}",
+              "up 分支投影"
+            ],
+            [
+              "\\mathrm{clamp}(\\cdot, a, b)",
+              "逐元素截断到 [a, b]"
+            ],
+            [
+              "\\sigma",
+              "sigmoid 函数"
+            ],
+            [
+              "\\odot",
+              "逐元素乘"
+            ]
+          ]
+        }
+      ],
+      "confidence": "verified",
+      "sources": [
+        "https://arxiv.org/abs/2508.10925",
+        "https://arxiv.org/html/2508.10925v1",
+        "https://github.com/openai/gpt-oss"
+      ]
+    },
+    {
+      "id": "kimi-k2",
+      "name": "Kimi K2",
+      "org": "Moonshot AI",
+      "released": "2025-07",
+      "accent": "#8b5cf6",
+      "paper": {
+        "title": "Kimi K2: Open Agentic Intelligence",
+        "url": "https://arxiv.org/abs/2507.20534"
+      },
+      "summary": "Kimi K2 是 1.04T 总参、32B 激活的 MoE，稀疏度 48（384 选 8）明显高于 DeepSeek-V3，注意力用 MLA 把 KV 压成 512 维 latent，并把头数砍到 64 以省解码 FLOPs。它提出 MuonClip：Muon 正交化更新叠加 QK-Clip，按 head 缩放 q/k 投影权重把最大 attention logit 压在 τ=100 以下，15.5T token 预训练零 loss spike。",
+      "tags": [
+        "MoE",
+        "MLA",
+        "Ultra-sparse",
+        "MuonClip"
+      ],
+      "stats": {
+        "total": "1.04T",
+        "active": "32B",
+        "layers": 61,
+        "context": "128K",
+        "experts": "384",
+        "topK": 8
+      },
+      "config": {
+        "layers": 61,
+        "dModel": 7168,
+        "heads": 64,
+        "kvHeads": 64,
+        "headDim": 192,
+        "experts": 384,
+        "shared": 1,
+        "topK": 8,
+        "vocab": 160000,
+        "moeInter": 2048,
+        "kvLora": 512,
+        "ropeDim": 64,
+        "context": 131072
+      },
+      "stack": [
+        {
+          "id": "embed",
+          "label": "Token Embedding",
+          "sub": "163,840 × 7,168",
+          "kind": "io",
+          "shape": "[B, T] → [B, T, 7168]",
+          "desc": "更大的词表（160K）覆盖多语言与代码 token。"
+        },
+        {
+          "id": "block",
+          "label": "Transformer Block",
+          "sub": "MLA + 384-expert MoE",
+          "kind": "repeat",
+          "count": 61,
+          "shape": "[B, T, 7168] → [B, T, 7168]",
+          "desc": "61 层，每层 MLA 注意力 + 384 专家 MoE；训练使用 MuonClip 保持稳定。",
+          "inner": [
+            {
+              "id": "in",
+              "label": "h  (残差流)",
+              "sub": "[B, T, 7168]",
+              "kind": "io",
+              "shape": "[B, T, 7168]",
+              "desc": "上一层隐藏状态。"
+            },
+            {
+              "id": "norm1",
+              "label": "RMSNorm",
+              "sub": "pre-norm",
+              "kind": "norm",
+              "shape": "[B, T, 7168]",
+              "desc": "注意力前归一化。",
+              "formula": "\\mathrm{RMSNorm}(x)=\\frac{x}{\\sqrt{\\frac{1}{d}\\sum_i x_i^2+\\epsilon}}\\odot\\gamma"
+            },
+            {
+              "id": "mla",
+              "label": "MLA",
+              "sub": "低秩 KV · 解耦 RoPE",
+              "kind": "attention",
+              "shape": "KV cache: [B,T,576] per layer",
+              "desc": "与 DeepSeek 系列同源的 MLA：缓存 512 维潜向量 + 64 维 RoPE 键，显著降低长上下文 KV 开销。",
+              "formula": "\\mathrm{Attn}_t=\\mathrm{softmax}\\left(\\frac{q_t^{C}k^{C\\top}+q_t^{R}k^{R\\top}}{\\sqrt{d_h}}\\right)v^{C}"
+            },
+            {
+              "id": "res1",
+              "label": "Residual +",
+              "sub": "h ← h + Attn(Norm(h))",
+              "kind": "residual",
+              "shape": "[B, T, 7168]",
+              "desc": "注意力残差。"
+            },
+            {
+              "id": "norm2",
+              "label": "RMSNorm",
+              "sub": "pre-norm",
+              "kind": "norm",
+              "shape": "[B, T, 7168]",
+              "desc": "MoE 前归一化。"
+            },
+            {
+              "id": "moe",
+              "label": "Sparse MoE",
+              "sub": "384 routed + 1 shared · top-8",
+              "kind": "moe",
+              "shape": "[B, T, 7168] → [B, T, 7168]",
+              "desc": "384 个路由专家，token 激活 8 个；激活参数仅 32B，稀疏率约 3%。",
+              "formula": "y=\\sum_{i\\in\\mathrm{TopK}}g_i\\,\\mathrm{FFN}_i(x)+\\mathrm{FFN}_{s}(x)"
+            },
+            {
+              "id": "res2",
+              "label": "Residual +",
+              "sub": "h ← h + MoE(Norm(h))",
+              "kind": "residual",
+              "shape": "[B, T, 7168]",
+              "desc": "MoE 残差。"
+            }
+          ]
+        },
+        {
+          "id": "norm",
+          "label": "Final RMSNorm",
+          "sub": "7,168",
+          "kind": "norm",
+          "shape": "[B, T, 7168]",
+          "desc": "最终归一化。"
+        },
+        {
+          "id": "head",
+          "label": "LM Head",
+          "sub": "7,168 × 163,840",
+          "kind": "head",
+          "shape": "[B, T, 7168] → [B, T, 163,840]",
+          "desc": "输出 160K 词表 logits。"
+        }
+      ],
+      "ideas": [
+        {
+          "title": "稀疏度 48 的 MoE 扩展",
+          "body": "总专家数从 DeepSeek-V3 的 256 提到 384，每 token 仍只激活 8 个，外加 1 个共享专家，专家隐层 2048。固定激活参数时提高稀疏度能持续降 loss，因此 K2 把稀疏度当作一个可扩展维度而不是单纯的效率参数。",
+          "formula": "\\mathrm{sparsity}=\\frac{E_{\\mathrm{total}}}{E_{\\mathrm{active}}}=\\frac{384}{8}=48",
+          "vars": [
+            [
+              "E_{\\mathrm{total}}",
+              "路由专家总数 384"
+            ],
+            [
+              "E_{\\mathrm{active}}",
+              "每 token 激活专家数 8"
+            ],
+            [
+              "1",
+              "共享专家数量"
+            ]
+          ]
+        },
+        {
+          "title": "MLA：把 KV cache 压成 512 维 latent",
+          "body": "MLA 不缓存每个 head 的 K/V，而是把 token 压成低维 latent c_t^KV，推理时再用上投影重建，KV cache 因此缩小一个数量级；query 侧同样先降到低秩再升维。内容分量之外还有一路 64 维 RoPE 分量参与打分，位置信息只走这一路。",
+          "formula": "c_{t}^{KV}=W^{DKV}x_{t}, k_{t}^{C}=W^{UK}c_{t}^{KV}, v_{t}^{C}=W^{UV}c_{t}^{KV}, o_{t}=\\mathrm{softmax}\\left(\\frac{q_{t}^{\\top}k_{t}}{\\sqrt{d}}\\right)v_{t}",
+          "vars": [
+            [
+              "c_{t}^{KV}",
+              "压缩后的 KV latent，缓存的就是它"
+            ],
+            [
+              "W^{DKV},W^{UK},W^{UV}",
+              "下投影与 K/V 上投影"
+            ],
+            [
+              "k_{t}",
+              "内容 key 与 RoPE key 拼接后的完整 key"
+            ],
+            [
+              "d",
+              "head 维度 192（128 内容 + 64 RoPE）"
+            ]
+          ]
+        },
+        {
+          "title": "QK-Clip：按 head 缩放 q/k 权重",
+          "body": "Muon 训练时 attention logit 会快速冲到 1000 以上，而 QK-Norm 无法用在 MLA 上（K 不显式物化）。QK-Clip 用前向已经算出的 per-head 最大 logit 作信号，超过阈值 τ 就把该 head 的 q/k 投影乘 √γ，不改当前步的前向与反向，只抑制权重继续长大。对 MLA 只裁 head-specific 的 q^C/k^C（乘 √γ）与 q^R（乘 γ），共享的 k^R 保持不动以免影响其他 head。",
+          "formula": "\\gamma_{h}=\\min\\left(1,\\frac{\\tau}{S_{\\max}^{h}}\\right), W_{q}^{h}\\leftarrow\\gamma_{h}^{\\frac{1}{2}}W_{q}^{h}, W_{k}^{h}\\leftarrow\\gamma_{h}^{\\frac{1}{2}}W_{k}^{h}",
+          "vars": [
+            [
+              "S_{\\max}^{h}",
+              "该 head 在本 batch 内的最大注意力 logit"
+            ],
+            [
+              "\\tau",
+              "目标阈值，K2 取 100"
+            ],
+            [
+              "\\gamma_{h}",
+              "该 head 的收缩系数"
+            ]
+          ]
+        },
+        {
+          "title": "Muon 正交化更新与 RMS 对齐",
+          "body": "动量矩阵先做 Newton–Schulz 迭代近似正交化，再乘 √max(n,m)·0.2 把 update RMS 对齐到 Adam，最后才做带 weight decay 的更新。这样每个矩阵参数都得到尺度一致的更新，token 效率高于 AdamW，也是 QK-Clip 能与优化器合成 MuonClip 的基础。",
+          "formula": "O_{t}=\\mathrm{NewtonSchulz}\\left(M_{t}\\right)\\cdot\\sqrt{\\max\\left(n,m\\right)}\\cdot 0.2, W_{t}=W_{t-1}-\\eta\\left(O_{t}+\\lambda W_{t-1}\\right)",
+          "vars": [
+            [
+              "M_{t}",
+              "动量累积的梯度矩阵"
+            ],
+            [
+              "n,m",
+              "权重矩阵的行列数"
+            ],
+            [
+              "\\eta",
+              "学习率"
+            ],
+            [
+              "\\lambda",
+              "weight decay 系数"
+            ]
+          ]
+        },
+        {
+          "title": "sigmoid 路由与共享专家",
+          "body": "路由打分用 sigmoid 而不是对全部专家做 softmax，每个专家独立判断是否被激活，取 top-8 后再在选中集合内归一化，避免 softmax 的零和约束。共享专家对所有 token 恒定生效，承载跨领域的通用特征。",
+          "formula": "s_{i,t}=\\mathrm{sigmoid}\\left(u_{t}^{\\top}e_{i}\\right), g_{i,t}=\\frac{s_{i,t}}{\\sum_{j\\in\\mathrm{TopK}}s_{j,t}}",
+          "vars": [
+            [
+              "u_{t}",
+              "token 的路由向量"
+            ],
+            [
+              "e_{i}",
+              "第 i 个专家的路由向量"
+            ],
+            [
+              "s_{i,t}",
+              "专家 i 对 token t 的原始打分"
+            ],
+            [
+              "g_{i,t}",
+              "top-k 内归一化后的权重"
+            ]
+          ]
+        }
+      ],
+      "confidence": "verified",
+      "sources": [
+        "https://arxiv.org/abs/2507.20534",
+        "https://arxiv.org/html/2507.20534v2",
+        "https://arxiv.org/abs/2412.19437"
+      ]
+    },
+    {
+      "id": "glm-4-5",
+      "name": "GLM-4.5",
+      "org": "Zhipu AI (Z.ai)",
+      "released": "2025-07",
+      "accent": "#fb7185",
+      "paper": {
+        "title": "GLM-4.5: Agentic, Reasoning, and Coding (ARC) Foundation Models",
+        "url": "https://arxiv.org/abs/2508.06471"
+      },
+      "summary": "GLM-4.5 走深而窄的 MoE 路线：92 层（3 层 dense 加 89 层 MoE）但 hidden 只有 5120，反而用 96 个注意力头配 8 个 KV head 的 GQA，并首次在这套 GQA 上叠加 QK-Norm 稳定 logits。位置编码用 partial RoPE 只旋转一半头维，MoE 用 sigmoid 门加无辅助损失均衡（bias 更新率 0.001），并加 1 层 MTP 供投机解码。",
+      "tags": [
+        "MoE",
+        "Partial RoPE",
+        "Loss-free Balancing",
+        "MTP",
+        "GQA"
+      ],
+      "stats": {
+        "total": "355B",
+        "active": "32B",
+        "layers": 92,
+        "context": "128K",
+        "experts": "160",
+        "topK": 8
+      },
+      "config": {
+        "layers": 92,
+        "dModel": 5120,
+        "heads": 96,
+        "kvHeads": 8,
+        "headDim": 128,
+        "experts": 160,
+        "shared": 1,
+        "topK": 8,
+        "vocab": 151552
+      },
+      "ideas": [
+        {
+          "title": "深而窄：92 层配 96 个注意力头",
+          "body": "同样激活 32B 参数，GLM-4.5 选择减少宽度（hidden 5120、160 个专家）而增加高度（92 层，其中 3 层 dense、89 层 MoE），因为更深的模型在推理类基准上更好。5120 维配 96 个头意味着每头只有 128 维、却只有 8 个 KV head，是极端的 GQA 配比。",
+          "formula": "d_{\\mathrm{model}}=5120, H=96, d_{h}=128, H_{KV}=8, L=92",
+          "vars": [
+            [
+              "H",
+              "query 头数 96"
+            ],
+            [
+              "H_{KV}",
+              "key/value 头数 8"
+            ],
+            [
+              "d_{h}",
+              "每头维度 128"
+            ],
+            [
+              "L",
+              "总层数 92（3 dense + 89 MoE）"
+            ]
+          ]
+        },
+        {
+          "title": "partial RoPE：只旋转一半头维",
+          "body": "128 维的头里只对前 64 维施加 RoPE（partial_rotary_factor = 0.5），后 64 维保持位置无关，位置分辨率减半但长上下文外推更稳。把上下文从 4K 扩到 32K 时只把 rope_theta 从 1e4 调到 1e6，不需要改模型结构。",
+          "formula": "q_{t}=\\left[\\mathrm{RoPE}_{\\theta}\\left(q_{t}^{\\left(1:64\\right)}\\right); q_{t}^{\\left(65:128\\right)}\\right], \\theta=10^{6}",
+          "vars": [
+            [
+              "\\mathrm{RoPE}_{\\theta}",
+              "旋转位置编码，base 频率 θ"
+            ],
+            [
+              "64/128",
+              "被旋转的维度比例 0.5"
+            ],
+            [
+              ";",
+              "向量拼接"
+            ]
+          ]
+        },
+        {
+          "title": "QK-Norm 稳定注意力 logits",
+          "body": "对每个 head 的 q/k 做归一化后再点积，使 logits 不随层深和训练步数漂移；GLM-4.5 是少数在 GQA 上显式开启 QK-Norm 的 MoE 模型。它替代了裁剪 logits 的 soft-cap 方案，因为后者只能在点积算完之后才起作用。",
+          "formula": "\\hat{q}=\\frac{q}{\\sqrt{\\frac{1}{d_{h}}\\sum_{j}q_{j}^{2}}}, \\hat{k}=\\frac{k}{\\sqrt{\\frac{1}{d_{h}}\\sum_{j}k_{j}^{2}}}, z_{t,s}=\\hat{q}_{t}^{\\top}\\hat{k}_{s}",
+          "vars": [
+            [
+              "d_{h}",
+              "head 维度 128"
+            ],
+            [
+              "\\hat{q},\\hat{k}",
+              "归一化后的 query、key"
+            ],
+            [
+              "z_{t,s}",
+              "归一化后的注意力 logit"
+            ]
+          ]
+        },
+        {
+          "title": "无辅助损失的专家均衡",
+          "body": "每个专家带一个 bias b_i，只加在 top-k 选择的打分上、不进入加权系数，因此不产生梯度、不会干扰语言建模目标。b_i 按本 batch 的实际负载与平均负载之差做 sign 更新，前 15T token 用 0.001 的学习率、之后冻结为 0，另加 1e-4 的序列级辅助损失兜底防止单条序列内部极端不均。",
+          "formula": "g_{i}=s_{i}+b_{i}, b_{i}\\leftarrow b_{i}+\\gamma\\cdot\\mathrm{sign}\\left(\\bar{c}-c_{i}\\right)",
+          "vars": [
+            [
+              "s_{i}",
+              "sigmoid 路由打分"
+            ],
+            [
+              "b_{i}",
+              "专家级 bias，只影响选择"
+            ],
+            [
+              "c_{i}",
+              "专家 i 在本 batch 的负载"
+            ],
+            [
+              "\\bar{c}",
+              "平均负载"
+            ],
+            [
+              "\\gamma",
+              "bias 更新率 0.001"
+            ]
+          ]
+        },
+        {
+          "title": "MTP 作为辅助损失与 draft",
+          "body": "在主干之后加一个 MoE 结构的 MTP 层，同时预测未来第 2 个 token，损失权重 λ 从 0.3 退火到 0.1。推理时这一层直接当投机解码的 draft，不增加额外模型。",
+          "formula": "L=L_{\\mathrm{NTP}}+\\lambda\\sum_{k=1}^{K}\\mathrm{CE}\\left(P_{k},t_{i+k}\\right)",
+          "vars": [
+            [
+              "L_{\\mathrm{NTP}}",
+              "主干的下一 token 损失"
+            ],
+            [
+              "K",
+              "MTP 预测的未来 token 数"
+            ],
+            [
+              "\\lambda",
+              "权重，0.3 → 0.1"
+            ],
+            [
+              "P_{k}",
+              "第 k 步预测分布"
+            ]
+          ]
+        },
+        {
+          "title": "sigmoid 门控 MoE 与 2.5 倍缩放",
+          "body": "160 个路由专家取 top-8，加权系数在选中集合内归一化后整体乘 routed_scaling_factor = 2.5，用来补偿稀疏化带来的方差下降；另有 1 个共享专家。sigmoid 打分让每个专家独立判断，避免 softmax 的零和竞争。",
+          "formula": "y=\\sum_{i\\in\\mathrm{TopK}}g_{i}E_{i}\\left(x\\right)+E_{\\mathrm{shared}}\\left(x\\right), g_{i}=\\frac{2.5\\cdot s_{i}}{\\sum_{j\\in\\mathrm{TopK}}s_{j}}",
+          "vars": [
+            [
+              "2.5",
+              "routed_scaling_factor"
+            ],
+            [
+              "E_{i}",
+              "路由专家，中间维 1536"
+            ],
+            [
+              "E_{\\mathrm{shared}}",
+              "共享专家"
+            ],
+            [
+              "s_{i}",
+              "sigmoid 打分"
+            ]
+          ]
+        }
+      ],
+      "confidence": "verified",
+      "sources": [
+        "https://arxiv.org/abs/2508.06471",
+        "https://arxiv.org/html/2508.06471",
+        "https://huggingface.co/zai-org/GLM-4.5/blob/main/config.json"
+      ]
+    },
+    {
+      "id": "minimax-m1",
+      "name": "MiniMax-M1",
+      "org": "MiniMax",
+      "released": "2025-06",
+      "accent": "#38bdf8",
+      "paper": {
+        "title": "MiniMax-M1: Scaling Test-Time Compute Efficiently with Lightning Attention",
+        "url": "https://arxiv.org/abs/2506.13585"
+      },
+      "summary": "MiniMax-M1 沿用 MiniMax-Text-01 的 hybrid-lightning 主干：80 层里每 7 层 lightning attention 插 1 层 softmax 全注意力（GQA，group size 8），因此原生支持 1M 上下文。MoE 为 32 专家选 2、专家隐层 9216，总参 456B、激活 45.9B；线性注意力的固定状态使长思考的算力近似线性增长，100K 生成长度只需 DeepSeek R1 约 25% 的 FLOPs。",
+      "tags": [
+        "Hybrid",
+        "Linear Attention",
+        "MoE",
+        "Long Context",
+        "Lightning Attention"
+      ],
+      "stats": {
+        "total": "456B",
+        "active": "45.9B",
+        "layers": 80,
+        "context": "1M",
+        "experts": "32",
+        "topK": 2
+      },
+      "config": {
+        "layers": 80,
+        "dModel": 6144,
+        "heads": 64,
+        "kvHeads": 8,
+        "headDim": 128,
+        "experts": 32,
+        "shared": 0,
+        "topK": 2,
+        "vocab": 200000,
+        "kvLayers": 10
+      },
+      "ideas": [
+        {
+          "title": "lightning attention 的左乘与右乘",
+          "body": "因果线性注意力写成 (QK^T ⊙ M)V，其中块内的左乘部分可以并行算，块间的右乘部分用 KV 递推。递推形式是线性复杂度但本身不可并行，分块正好把两者拆开，避免了对 cumsum 的依赖。",
+          "formula": "O=\\left[\\left(QK^{\\top}\\right)\\odot M\\right]V, KV_{t}=KV_{t-1}+k_{t}v_{t}^{\\top}, o_{t}^{\\top}=q_{t}^{\\top}KV_{t}",
+          "vars": [
+            [
+              "M",
+              "下三角因果掩码，M_{ts}=1 当 t ≥ s"
+            ],
+            [
+              "KV_{t}",
+              "累积的 d × d 状态矩阵"
+            ],
+            [
+              "\\odot",
+              "逐元素乘"
+            ]
+          ]
+        },
+        {
+          "title": "分块递推：块内左乘、块间右乘",
+          "body": "把 Q/K/V 按行切成 B×d 的块，第 2 块对第 1 块历史的贡献写成 Q_2·KV_1，块内仍用 (Q_2K_2^T ⊙ M)V_2，而 KV_1 由 KV_0 + K_1^T V_1 一次矩阵乘更新。这样总复杂度降到 O(nd² + nBd)，B 取几十即可。",
+          "formula": "O_{2}=Q_{2}KV_{1}+\\left[\\left(Q_{2}K_{2}^{\\top}\\right)\\odot M\\right]V_{2}, KV_{1}=KV_{0}+K_{1}^{\\top}V_{1}",
+          "vars": [
+            [
+              "KV_{1}",
+              "前一个块结束时的状态"
+            ],
+            [
+              "B",
+              "块大小"
+            ],
+            [
+              "n",
+              "序列长度"
+            ],
+            [
+              "O(nd² + nBd)",
+              "lightning attention 的总复杂度"
+            ]
+          ]
+        },
+        {
+          "title": "7:1 混合：70 层线性 + 10 层全注意力",
+          "body": "纯线性注意力的检索能力有限，因此在每 7 层 lightning attention 之后插 1 层 softmax 全注意力，80 层里共 10 层做全局注意力、70 层做线性注意力。全注意力层用 GQA（64 个 query head 分成 8 组）保证精确检索，其余层用固定大小的状态换取线性开销。",
+          "formula": "N_{\\mathrm{softmax}}=\\frac{80}{7+1}=10, N_{\\mathrm{lightning}}=80-10=70",
+          "vars": [
+            [
+              "7:1",
+              "线性层与全注意力层的比例"
+            ],
+            [
+              "GQA group=8",
+              "每 8 个 query head 共享 1 组 KV"
+            ],
+            [
+              "1M",
+              "原生训练上下文长度"
+            ]
+          ]
+        },
+        {
+          "title": "32 专家 top-2 的 MoE",
+          "body": "每个 MoE 层 32 个专家、每 token 只激活 2 个，专家隐层 9216，是少而大的专家配置（对比 K2 的多而小）。总参 456B、激活 45.9B，负载均衡用 global router 在全局 batch 上统计而非逐序列统计。",
+          "formula": "y=\\sum_{i\\in\\mathrm{Top2}\\left(s\\right)}g_{i}E_{i}\\left(x\\right), g_{i}=\\frac{s_{i}}{s_{1}+s_{2}}",
+          "vars": [
+            [
+              "E_{i}",
+              "专家 FFN，隐层 9216"
+            ],
+            [
+              "s_{i}",
+              "路由打分"
+            ],
+            [
+              "45.9B / 456B",
+              "激活参数 / 总参数"
+            ]
+          ]
+        },
+        {
+          "title": "RoPE 只作用于一半头维",
+          "body": "softmax 层沿用 MiniMax-Text-01 的设置：128 维头里只对前 64 维加 RoPE（base 10000），另一半不编码位置。实验上这种半维 RoPE 已足够做长度外推，配合线性层的衰减，训练 1M、推理可推到 4M。",
+          "formula": "q_{t}=\\left[\\mathrm{RoPE}_{\\theta}\\left(q_{t}^{\\left(1:64\\right)}\\right); q_{t}^{\\left(65:128\\right)}\\right], \\theta=10^{4}",
+          "vars": [
+            [
+              "64/128",
+              "被旋转的维度比例 0.5"
+            ],
+            [
+              "\\theta",
+              "RoPE base 频率"
+            ],
+            [
+              "4M",
+              "推理时可外推的上下文长度"
+            ]
+          ]
+        }
+      ],
+      "confidence": "verified",
+      "sources": [
+        "https://arxiv.org/abs/2506.13585",
+        "https://arxiv.org/html/2506.13585",
+        "https://arxiv.org/abs/2501.08313"
+      ]
+    },
+    {
+      "id": "llama-4-maverick",
+      "name": "Llama 4 Maverick",
+      "org": "Meta",
+      "released": "2025-04",
+      "accent": "#f97316",
+      "paper": {
+        "title": "The Llama 4 herd: The beginning of a new era of natively multimodal AI innovation",
+        "url": "https://ai.meta.com/blog/llama-4-multimodal-intelligence/"
+      },
+      "summary": "Llama 4 是 Meta 首个 MoE 旗舰，Maverick 以 128 个 routed experts + 1 个 shared expert、每 token 只激活 1 个路由专家，实现 400B 总参数 / 17B 激活参数。架构上最关键的是 iRoPE：绝大多数层完全不用位置编码（NoPE），只在少数层插入 RoPE，并在推理时对 query 做随位置增长的温度缩放，以支撑 1M 上下文。视觉侧采用 early fusion，图像 patch 由 MetaCLIP 初始化的 ViT 编码后直接进入统一 token 流，从预训练开始就与文本联合训练。",
+      "tags": [
+        "MoE",
+        "iRoPE",
+        "early fusion",
+        "NoPE",
+        "FP8"
+      ],
+      "stats": {
+        "total": "400B",
+        "active": "17B",
+        "layers": 48,
+        "context": "1M",
+        "experts": "128",
+        "topK": 1
+      },
+      "config": {
+        "layers": 48,
+        "dModel": 5120,
+        "heads": 40,
+        "kvHeads": 8,
+        "headDim": 128,
+        "experts": 128,
+        "shared": 1,
+        "topK": 1,
+        "vocab": 202048
+      },
+      "ideas": [
+        {
+          "title": "iRoPE：把位置编码稀疏到少数层",
+          "body": "Llama 4 的 interleaved attention 让大部分层成为 NoPE（无位置编码）层：48 层中 36 层 no_rope_layers=1（不施加位置编码），只有每 4 层的最后 1 层携带 RoPE（共 12 层）。这样内容寻址与位置外推被拆开：NoPE 层专注语义匹配，RoPE 层提供相对位置锚点，从而在 1M 级上下文上避免位置插值带来的分布偏移。",
+          "formula": "\\mathrm{PE}_l(t) = \\mathrm{RoPE}(t) \\text{ if } l \\equiv 3 \\ (\\mathrm{mod}\\ 4), \\quad \\mathrm{PE}_l(t) = \\mathrm{Id} \\text{ otherwise}",
+          "vars": [
+            [
+              "l",
+              "Transformer 层索引"
+            ],
+            [
+              "t",
+              "token 在序列中的位置"
+            ],
+            [
+              "\\mathrm{RoPE}(t)",
+              "该层对 token 施加旋转位置编码"
+            ],
+            [
+              "\\mathrm{Id}",
+              "恒等映射，即 NoPE 层不注入任何位置信息"
+            ]
+          ]
+        },
+        {
+          "title": "推理期 attention 温度缩放",
+          "body": "长度外推的另一个杠杆是温度：推理时按 query 的绝对位置放大 q，使 attention logits 在超长序列上仍保持可分辨的尖锐度。温度随位置对数增长而非线性增长，因此短上下文几乎不受影响。",
+          "formula": "q'_{t} = q_{t} \\cdot \\left(1 + \\alpha \\ln\\left(\\left\\lfloor \\frac{t}{s} \\right\\rfloor + 1\\right)\\right), \\quad \\alpha = 0.1,\\ s = 8192",
+          "vars": [
+            [
+              "q_{t}",
+              "位置 t 的 query 向量"
+            ],
+            [
+              "\\alpha",
+              "温度增长系数，Llama 4 取 0.1"
+            ],
+            [
+              "s",
+              "温度开始生效的位置阈值 floor_scale，取 8192"
+            ],
+            [
+              "\\lfloor \\cdot \\rfloor",
+              "向下取整"
+            ]
+          ]
+        },
+        {
+          "title": "Top-1 路由加共享专家",
+          "body": "每个 token 同时送入 1 个 shared expert 和 128 个 routed experts 中得分最高的 1 个，输出相加。共享专家承担通用变换、路由专家承担特化知识，因此激活参数只有 17B，却保留了 400B 的容量；dense 层与 MoE 层交替，进一步降低 serving 开销。",
+          "formula": "y = E_{\\mathrm{shared}}(x) + \\sum_{i \\in \\mathrm{Top1}(s)} g_{i} E_{i}(x), \\quad s = W_{r} x",
+          "vars": [
+            [
+              "E_{\\mathrm{shared}}",
+              "始终激活的共享专家 FFN"
+            ],
+            [
+              "E_{i}",
+              "第 i 个路由专家 FFN"
+            ],
+            [
+              "g_{i}",
+              "被选中专家的路由概率"
+            ],
+            [
+              "W_{r}",
+              "router 投影矩阵"
+            ],
+            [
+              "\\mathrm{Top1}(s)",
+              "router 得分最高的 1 个专家"
+            ]
+          ]
+        },
+        {
+          "title": "稠密层与 MoE 层交替",
+          "body": "Maverick 并非每层都是 MoE：48 层中只有 24 层是 MoE（config 中 moe_layers 为奇数层，interleave_moe_layer_step=2），其余是 dense FFN。这样在保持参数容量的同时减少路由与 all-to-all 通信次数，是 MoE 推理成本与质量之间的折中。",
+          "formula": "\\mathrm{Block}_{l}(h) = h + \\mathrm{FFN}_{\\mathrm{dense}}(h) \\text{ if } l \\in \\mathcal{D}, \\quad \\mathrm{Block}_{l}(h) = h + \\mathrm{MoE}(h) \\text{ otherwise}",
+          "vars": [
+            [
+              "\\mathcal{D}",
+              "24 个 dense 层（偶数层）"
+            ],
+            [
+              "\\mathrm{FFN}_{\\mathrm{dense}}",
+              "普通稠密前馈网络"
+            ],
+            [
+              "\\mathrm{MoE}(h)",
+              "共享专家加单路由专家的稀疏前馈"
+            ]
+          ]
+        },
+        {
+          "title": "Early fusion：图像 token 直接进主干",
+          "body": "图像经 ViT 编码后被线性投影成与文本同维的 token，直接拼接进序列开头，与文本共享同一套注意力和 MoE 参数从头联合预训练。相比“冻结 LLM + 外挂适配器”的晚期融合，early fusion 让视觉与语言在预训练阶段就争夺同一套表征。",
+          "formula": "H_{0} = \\left[\\, E_{\\mathrm{tok}}(x_{1}), \\ldots, E_{\\mathrm{tok}}(x_{n}),\\ W_{v}\\,\\mathrm{ViT}(I) \\,\\right]",
+          "vars": [
+            [
+              "E_{\\mathrm{tok}}",
+              "文本 token embedding"
+            ],
+            [
+              "\\mathrm{ViT}(I)",
+              "图像 I 经视觉编码器得到的 patch 特征"
+            ],
+            [
+              "W_{v}",
+              "视觉到语言维度的投影矩阵"
+            ],
+            [
+              "H_{0}",
+              "拼接后的统一输入序列"
+            ]
+          ]
+        }
+      ],
+      "confidence": "reported",
+      "sources": [
+        "https://ai.meta.com/blog/llama-4-multimodal-intelligence/",
+        "https://github.com/meta-llama/llama-models/blob/main/models/llama4/MODEL_CARD.md",
+        "https://huggingface.co/meta-llama/Llama-4-Maverick-17B-128E-Instruct"
+      ]
+    },
+    {
+      "id": "deepseek-v3",
+      "name": "DeepSeek-V3",
+      "org": "DeepSeek-AI",
+      "released": "2024-12",
+      "accent": "#6d8cff",
+      "paper": {
+        "title": "DeepSeek-V3 Technical Report",
+        "url": "https://arxiv.org/abs/2412.19437"
+      },
+      "summary": "DeepSeek-V3 是 671B 总参数、37B 激活参数的 MoE 基座模型，确立了此后整个家族沿用的骨架：MLA 注意力 + DeepSeekMoE 前馈层。它首次提出无辅助损失的专家负载均衡（用可调偏置项而非辅助损失引导 top-k 路由），并引入多 token 预测（MTP）训练目标。这两个设计后续被 V3.2、V4、V4.1 全部继承。",
+      "tags": [
+        "MoE",
+        "MLA",
+        "MTP",
+        "AuxLossFree",
+        "FP8"
+      ],
+      "stats": {
+        "total": "671B",
+        "active": "37B",
+        "layers": 61,
+        "context": "128K",
+        "experts": "256 routed + 1 shared",
+        "topK": 8
+      },
+      "config": {
+        "layers": 61,
+        "dModel": 7168,
+        "heads": 128,
+        "kvHeads": 128,
+        "headDim": 128,
+        "experts": 256,
+        "shared": 1,
+        "topK": 8,
+        "vocab": 129280
+      },
+      "ideas": [
+        {
+          "title": "MLA 低秩 KV 联合压缩",
+          "body": "MLA 不直接缓存每头的 K/V，而是把隐藏状态下投影成一个低维潜向量 c^{KV}，K 和 V 都在需要时由它上投影得到。推理时每层每 token 只需缓存 512 维的 c^{KV} 和 64 维的解耦 RoPE 键 k^{R}，共 576 维，而 128 头 MHA 需要 128×128×2 = 32768 维，压缩比约 57 倍。",
+          "formula": "\\mathbf{c}_t^{KV}=W^{DKV}\\mathbf{h}_t,\\quad \\mathbf{k}_t^{C}=W^{UK}\\mathbf{c}_t^{KV},\\quad \\mathbf{v}_t^{C}=W^{UV}\\mathbf{c}_t^{KV}",
+          "vars": [
+            [
+              "\\mathbf{c}_t^{KV}",
+              "512 维 KV 联合潜向量，唯一需要缓存的 K/V 部分"
+            ],
+            [
+              "W^{DKV}",
+              "下投影矩阵，d=7168 → 512"
+            ],
+            [
+              "W^{UK}",
+              "键上投影矩阵，512 → 128×128"
+            ],
+            [
+              "W^{UV}",
+              "值上投影矩阵，512 → 128×128"
+            ]
+          ]
+        },
+        {
+          "title": "解耦 RoPE 与查询侧压缩",
+          "body": "位置信息不进入潜向量，而是走一条独立的 64 维通路 k^{R}=RoPE(W^{KR}h_t)，再与内容键拼接，这样 KV 缓存不必保存旋转后的键。查询侧同样先压到 1536 维 c^{Q} 再上投影，目的是削减训练时的激活内存。注意力打分用 sqrt(d_h + d_h^R) 归一化。",
+          "formula": "\\mathbf{k}_t^{R}=\\mathrm{RoPE}\\left(W^{KR}\\mathbf{h}_t\\right),\\quad \\mathbf{o}_{t,i}=\\sum_{j=1}^{t}\\mathrm{Softmax}_j\\left(\\frac{\\mathbf{q}_{t,i}^{T}\\mathbf{k}_{j,i}}{\\sqrt{d_h+d_h^{R}}}\\right)\\mathbf{v}_{j,i}^{C}",
+          "vars": [
+            [
+              "\\mathbf{k}_t^{R}",
+              "64 维解耦 RoPE 键，所有头共享"
+            ],
+            [
+              "\\mathbf{c}_t^{Q}",
+              "1536 维查询潜向量"
+            ],
+            [
+              "d_h",
+              "每头内容维度 128"
+            ],
+            [
+              "d_h^{R}",
+              "每头 RoPE 维度 64"
+            ]
+          ]
+        },
+        {
+          "title": "DeepSeekMoE 细粒度路由与共享专家",
+          "body": "前馈层由 1 个共享专家和 256 个细粒度路由专家组成，每个 token 激活 8 个路由专家。共享专家捕获通用知识，路由专家做专业化分工；门控值在选中的 8 个专家之间重新归一化，保证输出尺度稳定。亲和度用 Sigmoid 而非 Softmax，使每个专家的打分相互独立。",
+          "formula": "\\mathbf{h}_t'=\\mathbf{u}_t+\\sum_{i=1}^{N_s}\\mathrm{FFN}_i^{(s)}\\left(\\mathbf{u}_t\\right)+\\sum_{i=1}^{N_r}g_{i,t}\\mathrm{FFN}_i^{(r)}\\left(\\mathbf{u}_t\\right),\\quad g_{i,t}=\\frac{g_{i,t}'}{\\sum_{j=1}^{N_r}g_{j,t}'}",
+          "vars": [
+            [
+              "N_s",
+              "共享专家数 = 1"
+            ],
+            [
+              "N_r",
+              "路由专家数 = 256"
+            ],
+            [
+              "K_r",
+              "每 token 激活专家数 = 8"
+            ],
+            [
+              "s_{i,t}",
+              "亲和度 Sigmoid(u_t^T e_i)"
+            ],
+            [
+              "g_{i,t}",
+              "归一化后的门控值"
+            ]
+          ]
+        },
+        {
+          "title": "无辅助损失的专家偏置平衡",
+          "body": "传统做法靠辅助损失逼负载均衡，但会损害模型性能。V3 改为给每个专家维护一个偏置 b_i，只把它加到路由打分上参与 top-k 选择，不参与最终门控加权。训练中每步监控负载：过载专家减小偏置，欠载专家增大偏置，偏置更新速度 γ 是超参。这样负载均衡与语言建模目标完全解耦。",
+          "formula": "g_{i,t}'=s_{i,t}\\ \\text{if}\\ s_{i,t}+b_i\\in\\mathrm{TopK}\\left(\\{s_{j,t}+b_j\\},K_r\\right),\\ \\text{else}\\ 0;\\quad b_i\\leftarrow b_i-\\gamma\\ (\\text{overloaded}),\\ b_i\\leftarrow b_i+\\gamma\\ (\\text{underloaded})",
+          "vars": [
+            [
+              "b_i",
+              "专家 i 的路由偏置，仅用于选择"
+            ],
+            [
+              "\\gamma",
+              "偏置更新步长（bias update speed）"
+            ],
+            [
+              "s_{i,t}",
+              "原始亲和度，仍用于加权"
+            ]
+          ]
+        },
+        {
+          "title": "序列级补充平衡损失",
+          "body": "无偏置策略只保证整个 batch 层面均衡，单个序列内仍可能极端倾斜。因此额外加一个极小的序列级平衡损失：f_i 是专家 i 在序列内被选中的比例，P_i 是其平均归一化打分，两者相乘求和。V3 中 α 取极小值，只起兜底作用。",
+          "formula": "\\mathcal{L}_{\\mathrm{Bal}}=\\alpha\\sum_{i=1}^{N_r}f_iP_i,\\quad f_i=\\frac{N_r}{K_rT}\\sum_{t=1}^{T}\\mathbf{1}\\left(s_{i,t}\\in\\mathrm{TopK}\\right),\\quad P_i=\\frac{1}{T}\\sum_{t=1}^{T}\\frac{s_{i,t}}{\\sum_{j=1}^{N_r}s_{j,t}}",
+          "vars": [
+            [
+              "\\alpha",
+              "平衡因子，V3 中取极小值"
+            ],
+            [
+              "f_i",
+              "专家 i 在序列内被选中的频率"
+            ],
+            [
+              "P_i",
+              "专家 i 的平均归一化亲和度"
+            ],
+            [
+              "T",
+              "序列长度"
+            ]
+          ]
+        },
+        {
+          "title": "MTP 多 token 预测目标",
+          "body": "每个 MTP 模块把上一深度的隐藏状态与下一 token 的嵌入拼接后送入一个 Transformer 块，再经共享的输出头预测第 k 个未来 token。总损失是主模型损失加上按 λ/D 缩放的 MTP 损失。V3 只挂 1 个 MTP 模块（D=1），推理时可直接当作投机解码的草稿头。",
+          "formula": "\\mathcal{L}_{\\mathrm{MTP}}=\\frac{\\lambda}{D}\\sum_{k=1}^{D}\\frac{1}{T}\\sum_{i=1}^{T}\\mathrm{CE}\\left(p_{i+k+1}^{k},\\ t_{i+k+1}\\right),\\quad \\mathcal{L}_{\\mathrm{total}}=\\mathcal{L}_{\\mathrm{main}}+\\mathcal{L}_{\\mathrm{MTP}}",
+          "vars": [
+            [
+              "D",
+              "MTP 模块深度，V3 取 1"
+            ],
+            [
+              "\\lambda",
+              "MTP 损失权重"
+            ],
+            [
+              "p_{i+k+1}^{k}",
+              "第 k 个模块对 i+k+1 位置的预测分布"
+            ],
+            [
+              "\\mathrm{CE}",
+              "交叉熵"
+            ]
+          ]
+        }
+      ],
+      "confidence": "verified",
+      "sources": [
+        "https://arxiv.org/abs/2412.19437",
+        "https://ar5iv.labs.arxiv.org/html/2412.19437",
+        "https://huggingface.co/deepseek-ai/DeepSeek-V3"
+      ]
+    }
+  ]
+}

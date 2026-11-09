@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Arch Lab · Architecture Microscope",
+    "description": "Turn each layer of frontier LLM papers into a rotatable 3D structural cutaway and 2D architecture map, with per-module tensor shapes, formulas and parameter math."
+  }
+}
