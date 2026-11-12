@@ -710,7 +710,18 @@ async function searchHuggingFace() {
       return null
     }
   })
-  return specs.filter(Boolean).slice(0, 12)
+  const valid = specs.filter(Boolean)
+  const latestSpecs = []
+  const byOwner = new Map()
+  for (const m of valid.filter((x) => x.discovery === 'latest')) {
+    const count = byOwner.get(m.org) || 0
+    if (count >= 2) continue
+    byOwner.set(m.org, count + 1)
+    latestSpecs.push(m)
+    if (latestSpecs.length >= 6) break
+  }
+  const popularSpecs = valid.filter((m) => m.discovery === 'popular').slice(0, 6)
+  return [...latestSpecs, ...popularSpecs].slice(0, 12)
 }
 
 function isArchitectureCandidate(m, baseOnly) {

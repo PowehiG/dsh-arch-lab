@@ -118,6 +118,7 @@ function Panel({ ctx }) {
   }, [loadLatest])
 
   const refreshLatest = async () => {
+    setModal({ type: 'latest', data: latest })
     const data = await loadLatest(true, true)
     setModal({ type: 'latest', data: data || latest })
   }
