@@ -153,6 +153,7 @@ h · 残差流
 - 43 层：**37 层 HCA + 6 层 MLA-DSA**，按 `compress_ratios` 的 `-2` 标记识别；
 - **VHA 在每一层 attention 中启用**：3D 场景会出现 `Q Premix`、`Postmix`、`输出门` 节点，attention 标题为 `HCA+VHA` / `MLA-DSA+VHA`；
 - 64 query heads、512/256 的层特定 head dim、512 routed experts top-10、1 shared expert、1M ctx；
+- KV 估算按层区分：37 个 HCA 层每 128 token 一条压缩 KV，6 个 MLA-DSA 层使用 latent；当前约 7.33 KB/token（不是把 43 层都当完整 KV）；
 - 模型卡统计：280B total / 14B activated。网络不可用时会显示 warning，但不会影响内置的 16 个模型和 2D/3D 视图。
 
 > arXiv / Hugging Face 都是公开 API；搜索结果不代表模型质量排名。Hugging Face 侧只提取 `config.json` 的公开字段，总参/激活仍以模型卡为准。

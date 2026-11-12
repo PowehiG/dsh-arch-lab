@@ -1316,13 +1316,22 @@ function estimateKvBytes(model) {
   if (num(c.kvBytesPerToken) > 0) return num(c.kvBytesPerToken)
   const layers = num(c.kvLayers) || num(c.layers) || 61
   const tags = (model.tags || []).join(' ').toLowerCase()
-  if (tags.includes('mla') || num(c.kvLora) > 0) {
-    const latent = num(c.kvLora) || 512
-    const rope = num(c.ropeDim) || 64
-    return layers * (latent + rope) * 2
-  }
   const kvHeads = num(c.kvHeads) || Math.max(1, Math.round((num(c.heads) || 32) / 4))
   const headDim = num(c.headDim) || 128
+  const latent = num(c.kvLora) || 512
+  const rope = num(c.ropeDim) || 64
+  if (Array.isArray(c.compressRatios) && c.compressRatios.length) {
+    let total = 0
+    for (let i = 0; i < Math.min(layers, c.compressRatios.length); i++) {
+      const ratio = Number(c.compressRatios[i])
+      if (ratio < 0) total += (latent + rope) * 2
+      else total += (kvHeads * headDim * 2 * 2) / Math.max(1, ratio)
+    }
+    if (total > 0) return Math.round(total)
+  }
+  if (tags.includes('mla') || num(c.kvLora) > 0) {
+    return layers * (latent + rope) * 2
+  }
   return layers * kvHeads * headDim * 2 * 2
 }
 
