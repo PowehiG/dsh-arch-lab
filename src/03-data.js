@@ -67,6 +67,8 @@ const KIND = {
   indexer: { label: 'Indexer', color: 'var(--pl-pink)', icon: 'target' },
   selector: { label: 'Top-k', color: 'var(--pl-amber)', icon: 'filter' },
   state: { label: 'State', color: 'var(--pl-green)', icon: 'merge' },
+  vha: { label: 'VHA', color: 'var(--pl-cyan)', icon: 'sparkles' },
+  gate: { label: 'Gate', color: 'var(--pl-amber)', icon: 'filter' },
   embed: { label: 'Embed', color: 'var(--pl-amber)', icon: 'down' },
   custom: { label: 'Module', color: 'var(--pl-indigo)', icon: 'cpu' },
 }
@@ -176,6 +178,26 @@ function layerPeriod(model) {
 
 function layerVariant(model, index) {
   const tags = (model.tags || []).join(' ').toLowerCase()
+  const config = model.config || {}
+  const ratios = Array.isArray(config.compressRatios) ? config.compressRatios : []
+  const vha = Boolean(config.useVha) || tags.includes('vha')
+  if (ratios.length) {
+    const raw = Number(ratios[index])
+    const isMlaDsa = Number.isFinite(raw) && raw < 0
+    return {
+      kind: isMlaDsa ? 'dsa' : 'hybrid',
+      badge: isMlaDsa ? 'MLA-DSA' : 'HCA',
+      label: isMlaDsa ? 'MLA-DSA + VHA' : 'HCA + VHA',
+      ratio: isMlaDsa ? 128 : (Number.isFinite(raw) && raw > 1 ? raw : 128),
+      headDim: isMlaDsa ? 256 : 512,
+      vha,
+      gated: Boolean(config.useGatedAttn),
+      qkNorm: Boolean(config.useQkNorm),
+      desc: isMlaDsa
+        ? 'MLA-DSA 全注意力层：使用 MLA latent KV，并用 DSA indexer 选 top-k token；这一层同时应用 VHA 的 Q Premix 与 Linear Postmix。'
+        : 'HCA 压缩注意力层：每 128 个 token 压成一条 KV；这一层同时应用 VHA 的 Q Premix 与 Linear Postmix。',
+    }
+  }
   const period = layerPeriod(model)
   const full = period ? (index + 1) % period === 0 : true
   if (tags.includes('kda')) {
@@ -231,13 +253,13 @@ function layerVariant(model, index) {
   return { kind: 'full', badge: 'ATTN', label: attentionLabel(model), desc: '标准自注意力层。' }
 }
 
-function layerShapes(model) {
+function layerShapes(model, variant) {
   const c = model.config || {}
   const tags = (model.tags || []).join(' ').toLowerCase()
   const d = num(c.dModel) || 4096
   const H = num(c.heads) || 32
   const KV = num(c.kvHeads) || H
-  const Dh = num(c.headDim) || 128
+  const Dh = num(variant && variant.headDim) || num(c.headDim) || 128
   const E = num(c.experts) || 0
   const K = num(c.topK) || 2
   const V = num(c.vocab) || 0
@@ -319,7 +341,7 @@ function buildLayerNodes(model, index) {
   const block = (model.stack || []).find((n) => n.kind === 'repeat' && n.inner) ||
     buildDefaultStack(model).find((n) => n.kind === 'repeat' && n.inner)
   const variant = layerVariant(model, index)
-  const shapes = layerShapes(model)
+  const shapes = layerShapes(model, variant)
   let nodes = (block && block.inner ? block.inner : buildDefaultStack(model).find((n) => n.kind === 'repeat').inner)
     .map((n) => ({ ...n, vars: n.vars || [] }))
   const attentions = nodes.filter((n) => n.kind === 'attention')
@@ -349,7 +371,7 @@ function buildLayerNodes(model, index) {
 
 function buildLayerInfo(model, index) {
   const variant = layerVariant(model, index)
-  const shapes = layerShapes(model)
+  const shapes = layerShapes(model, variant)
   const nodes = buildLayerNodes(model, index)
   return {
     type: 'layer',

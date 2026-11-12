@@ -733,7 +733,7 @@ const CSS = `
   background:linear-gradient(90deg,rgba(125,211,252,.04),rgba(125,211,252,.55));opacity:0}
 .pl-s3-leader[data-selected="1"]{height:2px;background:linear-gradient(90deg,rgba(125,211,252,.12),rgba(125,211,252,.9));
   box-shadow:0 0 8px rgba(34,211,238,.45)}
-.pl-s3-label{position:absolute;left:0;top:0;display:flex;flex-direction:column;gap:2px;max-width:132px;
+.pl-s3-label{position:absolute;left:0;top:0;display:flex;flex-direction:column;gap:2px;max-width:112px;
   padding:4px 6px;border-radius:6px;opacity:0;will-change:transform;
   background:color-mix(in srgb,var(--dsw-alias-bg-base) 84%,transparent);
   border:1px solid color-mix(in srgb,var(--pl-line) 84%,transparent);
@@ -743,7 +743,7 @@ const CSS = `
 .pl-s3-label b{font-size:9px;font-weight:620;line-height:1.15;color:var(--pl-text);
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis;letter-spacing:.005em}
 .pl-s3-label code{font:8px "SFMono-Regular",ui-monospace,Menlo,monospace;line-height:1.15;color:var(--pl-dim);
-  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:120px}
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100px}
 .pl-s3-label[data-selected="1"]{z-index:6;border-color:color-mix(in srgb,var(--pl-cyan) 72%,transparent);
   box-shadow:0 0 0 1px color-mix(in srgb,var(--pl-cyan) 28%,transparent),0 8px 24px rgba(0,0,0,.42)}
 .pl-s3-label[data-selected="1"] b{color:color-mix(in srgb,var(--pl-cyan) 82%,var(--pl-text))}
@@ -752,6 +752,8 @@ const CSS = `
 .pl-s3-legend{position:absolute;left:36px;top:11px;z-index:3;pointer-events:none;display:flex;align-items:center;gap:9px;
   padding:4px 7px;border-radius:6px;background:color-mix(in srgb,var(--dsw-alias-bg-base) 46%,transparent);
   border:1px solid color-mix(in srgb,var(--pl-line) 52%,transparent);backdrop-filter:blur(5px)}
+.pl-vha-chip{color:var(--pl-cyan);border-color:color-mix(in srgb,var(--pl-cyan) 48%,transparent);
+  background:color-mix(in srgb,var(--pl-cyan) 11%,transparent);letter-spacing:.08em}
 .pl-s3-legend span{display:inline-flex;align-items:center;gap:4px;white-space:nowrap}
 .pl-s3-legend i{width:5px;height:5px;border-radius:50%;box-shadow:0 0 7px currentColor}
 .pl-s3-legend b{font-size:7.5px;font-weight:500;color:var(--pl-dim);letter-spacing:.02em}
@@ -1266,6 +1268,8 @@ const KIND = {
   indexer: { label: 'Indexer', color: 'var(--pl-pink)', icon: 'target' },
   selector: { label: 'Top-k', color: 'var(--pl-amber)', icon: 'filter' },
   state: { label: 'State', color: 'var(--pl-green)', icon: 'merge' },
+  vha: { label: 'VHA', color: 'var(--pl-cyan)', icon: 'sparkles' },
+  gate: { label: 'Gate', color: 'var(--pl-amber)', icon: 'filter' },
   embed: { label: 'Embed', color: 'var(--pl-amber)', icon: 'down' },
   custom: { label: 'Module', color: 'var(--pl-indigo)', icon: 'cpu' },
 }
@@ -1375,6 +1379,26 @@ function layerPeriod(model) {
 
 function layerVariant(model, index) {
   const tags = (model.tags || []).join(' ').toLowerCase()
+  const config = model.config || {}
+  const ratios = Array.isArray(config.compressRatios) ? config.compressRatios : []
+  const vha = Boolean(config.useVha) || tags.includes('vha')
+  if (ratios.length) {
+    const raw = Number(ratios[index])
+    const isMlaDsa = Number.isFinite(raw) && raw < 0
+    return {
+      kind: isMlaDsa ? 'dsa' : 'hybrid',
+      badge: isMlaDsa ? 'MLA-DSA' : 'HCA',
+      label: isMlaDsa ? 'MLA-DSA + VHA' : 'HCA + VHA',
+      ratio: isMlaDsa ? 128 : (Number.isFinite(raw) && raw > 1 ? raw : 128),
+      headDim: isMlaDsa ? 256 : 512,
+      vha,
+      gated: Boolean(config.useGatedAttn),
+      qkNorm: Boolean(config.useQkNorm),
+      desc: isMlaDsa
+        ? 'MLA-DSA 全注意力层：使用 MLA latent KV，并用 DSA indexer 选 top-k token；这一层同时应用 VHA 的 Q Premix 与 Linear Postmix。'
+        : 'HCA 压缩注意力层：每 128 个 token 压成一条 KV；这一层同时应用 VHA 的 Q Premix 与 Linear Postmix。',
+    }
+  }
   const period = layerPeriod(model)
   const full = period ? (index + 1) % period === 0 : true
   if (tags.includes('kda')) {
@@ -1430,13 +1454,13 @@ function layerVariant(model, index) {
   return { kind: 'full', badge: 'ATTN', label: attentionLabel(model), desc: '标准自注意力层。' }
 }
 
-function layerShapes(model) {
+function layerShapes(model, variant) {
   const c = model.config || {}
   const tags = (model.tags || []).join(' ').toLowerCase()
   const d = num(c.dModel) || 4096
   const H = num(c.heads) || 32
   const KV = num(c.kvHeads) || H
-  const Dh = num(c.headDim) || 128
+  const Dh = num(variant && variant.headDim) || num(c.headDim) || 128
   const E = num(c.experts) || 0
   const K = num(c.topK) || 2
   const V = num(c.vocab) || 0
@@ -1518,7 +1542,7 @@ function buildLayerNodes(model, index) {
   const block = (model.stack || []).find((n) => n.kind === 'repeat' && n.inner) ||
     buildDefaultStack(model).find((n) => n.kind === 'repeat' && n.inner)
   const variant = layerVariant(model, index)
-  const shapes = layerShapes(model)
+  const shapes = layerShapes(model, variant)
   let nodes = (block && block.inner ? block.inner : buildDefaultStack(model).find((n) => n.kind === 'repeat').inner)
     .map((n) => ({ ...n, vars: n.vars || [] }))
   const attentions = nodes.filter((n) => n.kind === 'attention')
@@ -1548,7 +1572,7 @@ function buildLayerNodes(model, index) {
 
 function buildLayerInfo(model, index) {
   const variant = layerVariant(model, index)
-  const shapes = layerShapes(model)
+  const shapes = layerShapes(model, variant)
   const nodes = buildLayerNodes(model, index)
   return {
     type: 'layer',
@@ -1796,6 +1820,8 @@ const SCENE_SIZE = {
   ffn: [2.9, 1.3, 2.25],
   head: [2.55, 0.72, 2.0],
   custom: [1.95, 0.72, 1.6],
+  vha: [2.35, 0.78, 1.85],
+  gate: [2.15, 0.72, 1.7],
 }
 
 function sceneSize(kind, special) {
@@ -1911,12 +1937,13 @@ function buildSceneGraph(model, index) {
       : variantKind === 'hybrid' ? [6.2, -0.2, 0.35]
         : variantKind === 'mla' || variantKind === 'dsa' ? [6.4, -0.2, 0.35]
           : [6.05, -0.2, 0.35]
-  const attnLabel = variantKind === 'dsa' ? 'MLA + DSA'
+  const baseAttnLabel = variantKind === 'dsa' ? (v.vha ? 'MLA-DSA' : 'MLA + DSA')
     : variantKind === 'mla' ? 'MLA 注意力'
-      : variantKind === 'hybrid' ? `${v.badge} 压缩注意力`
+      : variantKind === 'hybrid' ? (v.vha ? 'HCA' : `${v.badge} 压缩注意力`)
         : variantKind === 'linear' ? v.label
           : variantKind === 'local' ? '滑动窗口'
             : v.label || '自注意力'
+  const attnLabel = v.vha ? `${baseAttnLabel}+VHA` : baseAttnLabel
 
   const attn = addRaw(attnId, attnPosition, {
     kind: 'attention',
@@ -2109,6 +2136,44 @@ function buildSceneGraph(model, index) {
     })
     link(norm2.id, ffn.id, 'main')
     link(ffn.id, res2.id, 'main')
+  }
+
+  /* ------------------------------------------------------------ VHA sublayer */
+  if (v.vha) {
+    const removeEdge = (from, to) => {
+      for (let i = edges.length - 1; i >= 0; i--) {
+        if (edges[i].from === from && edges[i].to === to) edges.splice(i, 1)
+      }
+    }
+    const qNode = nodes.find((n) => n.id === 'scene-q')
+    if (qNode) {
+      const premix = addS('scene-premix', 'Q Premix', 'vha', [4.55, -3.55, 2.75],
+        `[B, ${Math.max(1, Math.round(sh.H / 2))}, T, ${sh.Dh}] → [B, ${sh.H}, T, ${sh.Dh}]`,
+        'VHA 的 Q Premix：按 KV 组对物理 query head 做近恒等线性变换，扩展出虚拟 query head。',
+        '\\tilde Q_{i,g}=Q_iW_g^{premix},\\quad W_g^{premix}=I+\\alpha\\epsilon',
+        { group: 'attention', special: 'vha' })
+      removeEdge(qNode.id, attn.id)
+      link(qNode.id, premix.id, 'branch')
+      link(premix.id, attn.id, 'branch')
+    }
+    const postmix = addS('scene-postmix', 'Postmix', 'vha', [4.6, 1.85, 1.55],
+      `[B, ${sh.H}, T, ${sh.Dh}] → [B, T, ${d}]`,
+      'VHA 的 Linear Postmix：在 head 轴上做低秩 identity-residual 混合，融合跨组 head 特征；推理时可吸收进 W_O。',
+      "Y'=(I_{H_v}+BA^{\\top})Y,\\quad A,B\\in\\mathbb{R}^{H_v\\times r}",
+      { group: 'attention', special: 'vha' })
+    removeEdge(attn.id, outProj.id)
+    link(attn.id, postmix.id, 'main')
+    if (v.gated) {
+      const gate = addS('scene-gatevha', '输出门', 'gate', [5.45, 2.35, 0.7],
+        `[B, T, ${d}] → [B, T, ${d}]`,
+        '低秩门控注意力：输出门由低秩 query latent 计算，门控乘在 attention 输出上。',
+        'g=\\sigma(W_gq_{\\mathrm{latent}}),\\quad y=g\\odot y',
+        { group: 'attention', special: 'gate' })
+      link(postmix.id, gate.id, 'main')
+      link(gate.id, outProj.id, 'main')
+    } else {
+      link(postmix.id, outProj.id, 'main')
+    }
   }
 
   /* -------------------------------------------------------- residual spine */
@@ -3705,6 +3770,8 @@ const S3_COLORS = {
   expert: 0x8b5cf6,
   head: 0x34d399,
   custom: 0x818cf8,
+  vha: 0x22d3ee,
+  gate: 0xfbbf24,
 }
 
 function s3Color(kind, special) {
@@ -3713,6 +3780,8 @@ function s3Color(kind, special) {
   if (special === 'state') return 0x2dd4bf
   if (special === 'indexer') return 0xf472b6
   if (special === 'selector') return 0xfbbf24
+  if (special === 'vha') return 0x22d3ee
+  if (special === 'gate') return 0xfbbf24
   return S3_COLORS[kind] || S3_COLORS.custom
 }
 
@@ -3720,10 +3789,10 @@ function s3Color(kind, special) {
 
 function s3LabelCandidates(node) {
   const group = node.group || ''
-  const vertical = [[0, 0], [0, -42], [0, -84], [0, -126]]
+  const vertical = [[0, 0], [0, -42], [0, -84], [0, -126], [0, -168], [0, -210], [0, -252]]
   const right = [[104, -4], [156, -4], [210, -4], [156, -48], [210, -48], [104, -48], [260, -4], [260, -48], [260, -96], [210, -96], [260, -144], [160, -96]]
   const left = [[-104, -4], [-156, -4], [-210, -4], [-156, -48], [-210, -48], [-104, -48], [-260, -4], [-260, -48], [-260, -96], [-210, -96], [-260, -144], [-160, -96]]
-  const diagonal = [[64, -84], [-64, -84], [118, -90], [-118, -90], [174, -90], [-174, -90]]
+  const diagonal = [[64, -84], [-64, -84], [118, -90], [-118, -90], [174, -90], [-174, -90], [220, -140], [-220, -140], [260, -200], [-260, -200]]
   const below = [[0, 36], [96, 36], [-96, 36], [156, 36], [-156, 36]]
   if (group === 'moe') return [...left, ...vertical, ...right, ...diagonal, ...below]
   if (group === 'attention') return [...right, ...vertical, ...left, ...diagonal, ...below]
@@ -4402,6 +4471,17 @@ function LayerScene3D({ model, selectedNodeId, onSelect, onClear, flow, ctx }) {
             if (!best || score < best.score) best = { x, y, rect, score, area }
           }
           if (!best) continue
+          if (best.area > 0) {
+            const baseY = best.y
+            for (const dy of [-34, 34, -68, 68, -102, 102, -136, 136, -170, 170, -204, 204, -238, 238, -272, 272]) {
+              const y = Math.max(lh + 6, Math.min(h - 48, baseY + dy))
+              const rect = { l: best.x - lw / 2, r: best.x + lw / 2, t: y - lh, b: y }
+              let area = 0
+              for (const r of placed) area += s3OverlapArea(rect, r)
+              for (const [oid, r] of obstacles) if (oid !== node.id) area += s3OverlapArea(rect, r) * 2.4
+              if (area === 0) { best = { ...best, y, rect } ; break }
+            }
+          }
           placed.push(best.rect)
           el.style.transform = `translate(-50%,-100%) translate3d(${best.x.toFixed(1)}px,${best.y.toFixed(1)}px,0)`
           el.style.opacity = v.z < 1 ? '1' : '0'
@@ -4493,6 +4573,7 @@ function LayerScene3D({ model, selectedNodeId, onSelect, onClear, flow, ctx }) {
       h('span', { key: 'k', className: 'pl-l3-bar-k' }, '3D LAYER STRUCTURE'),
       h('b', { key: 'l', className: 'pl-l3-bar-l' }, `L${activeIndex + 1} / ${total}`),
       h('span', { key: 'v', className: 'pl-l3-bar-v', 'data-kind': variant.kind }, variant.badge),
+      variant.vha ? h('span', { key: 'vha', className: 'pl-l3-bar-v pl-vha-chip', title: 'Virtual Head Attention in this layer' }, 'VHA') : null,
       h('span', { key: 's', className: 'pl-l3-bar-shape' }, graph.shape),
       h('span', { key: 'kv', className: 'pl-l3-bar-kv' }, graph.kv),
       h('span', { key: 'sp', className: 'pl-l3-bar-sp' }),

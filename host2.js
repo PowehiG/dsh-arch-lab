@@ -158,7 +158,7 @@ async function handleRoute(ctx, req, res) {
       return json(res, 200, data)
     }
     if (url.pathname === `${ROUTE_PREFIX}health`) {
-      return json(res, 200, { ok: true, custom: customModels.size, version: 11 })
+      return json(res, 200, { ok: true, custom: customModels.size, version: 12 })
     }
     return json(res, 404, { ok: false, error: 'not found' })
   } catch (error) {
@@ -724,14 +724,15 @@ async function searchHuggingFace() {
   ].slice(0, 28)
   const specs = await mapLimit(candidates, 4, async (m) => {
     try {
-      const configUrl = `https://huggingface.co/${m.id}/raw/main/config.json`
-      const r = await fetch(configUrl, {
-        signal: AbortSignal.timeout(10000),
-        headers: { 'user-agent': 'ArchLab/2.1' },
-      })
-      if (!r.ok) return null
-      const cfg = await r.json()
-      const spec = huggingFaceSpec(m, cfg)
+      const base = `https://huggingface.co/${m.id}/raw/main`
+      const [configResponse, readmeResponse] = await Promise.allSettled([
+        fetch(`${base}/config.json`, { signal: AbortSignal.timeout(10000), headers: { 'user-agent': 'ArchLab/2.1' } }),
+        fetch(`${base}/README.md`, { signal: AbortSignal.timeout(10000), headers: { 'user-agent': 'ArchLab/2.1' } }),
+      ])
+      if (configResponse.status !== 'fulfilled' || !configResponse.value.ok) return null
+      const cfg = await configResponse.value.json()
+      const readme = readmeResponse.status === 'fulfilled' && readmeResponse.value.ok ? await readmeResponse.value.text() : ''
+      const spec = huggingFaceSpec(m, cfg, readme)
       if (spec) spec.discovery = m._discovery || 'latest'
       return spec
     } catch {
@@ -776,7 +777,36 @@ function isArchitectureCandidate(m, baseOnly) {
   return true
 }
 
-function huggingFaceSpec(m, cfg) {
+function parseCardStats(readme) {
+  const text = String(readme || '')
+  const out = { total: 0, active: 0 }
+  const totalPatterns = [
+    /Total\s+Params?\s*\|\s*([\d.]+)\s*([BT])/i,
+    /(\d+(?:\.\d+)?)\s*([BT])\s+total\s+parameters/i,
+    /total\s+parameters\s*(?:of|:|=)?\s*(\d+(?:\.\d+)?)\s*([BT])/i,
+  ]
+  const activePatterns = [
+    /Activated\s+Params?(?:\s+per\s+Token)?\s*\|\s*([\d.]+)\s*([BT])/i,
+    /(\d+(?:\.\d+)?)\s*([BT])\s+activated\s+per\s+token/i,
+    /activated\s+parameters?[^.]{0,40}?(\d+(?:\.\d+)?)\s*([BT])/i,
+  ]
+  const read = (patterns) => {
+    for (const re of patterns) {
+      const m = text.match(re)
+      if (m) return Number(m[1]) * (m[2].toUpperCase() === 'T' ? 1e12 : 1e9)
+    }
+    return 0
+  }
+  out.total = read(totalPatterns)
+  out.active = read(activePatterns)
+  if (!out.active) {
+    const m = text.match(/Activated Params?\s*\|\s*([\d.]+)\s*([BT])/i)
+    if (m) out.active = Number(m[1]) * (m[2].toUpperCase() === 'T' ? 1e12 : 1e9)
+  }
+  return out
+}
+
+function huggingFaceSpec(m, cfg, readme = '') {
   if (!cfg || typeof cfg !== 'object') return null
   const layers = numValue(cfg.num_hidden_layers, cfg.n_layer, cfg.num_layers, cfg.n_layers)
   const dModel = numValue(cfg.hidden_size, cfg.n_embd, cfg.d_model, cfg.model_dim)
@@ -794,30 +824,43 @@ function huggingFaceSpec(m, cfg) {
   const org = id.includes('/') ? id.split('/')[0] : 'Hugging Face'
   const modelType = String(cfg.model_type || (Array.isArray(cfg.architectures) ? cfg.architectures[0] : '') || 'transformer')
   const tags = []
+  const useVha = Boolean(cfg.use_vha_attention) || /vha|virtual.?head/i.test(modelType)
+  if (useVha) tags.push('VHA')
   if (experts > 1) tags.push('MoE')
-  if (heads && kvHeads < heads) tags.push('GQA')
-  if (/mla|latent/i.test(modelType) || cfg.kv_lora_rank || cfg.hybrid_mla_attention) tags.push('MLA')
-  if (/vha|virtual.?head/i.test(modelType)) tags.push('VHA')
-  if (/deepseek/i.test(modelType)) tags.push('MLA')
-  if (cfg.csa_dense_mode || /\bcsa\b/i.test(modelType)) tags.push('CSA')
-  if (cfg.hca_rope_type || /\bhca\b/i.test(modelType)) tags.push('HCA')
-  if (cfg.index_topk || cfg.index_n_heads) tags.push('DSA')
-  if (cfg.compress_ratios || /hybrid/i.test(modelType)) tags.push('Hybrid')
+  if (cfg.compress_ratios || cfg.hca_rope_type) tags.push('HCA')
+  if (cfg.index_topk || cfg.hybrid_mla_attention) tags.push('DSA')
+  if (cfg.kv_lora_rank || cfg.hybrid_mla_attention || cfg.use_mla) tags.push('MLA')
+  if (cfg.use_qk_norm) tags.push('QK-Norm')
+  if (cfg.use_gated_attn) tags.push('Low-Rank Gate')
+  if (heads && kvHeads < heads && !useVha) tags.push('GQA')
   if (cfg.enable_hyper_connections) tags.push('mHC')
-  if (/moe|mixture/i.test(modelType) && experts > 1) tags.push('MoE')
+  if (cfg.multimax) tags.push('MultiMax')
+  if (cfg.num_nextn_predict_layers || cfg.mtp_shared_last_layer) tags.push('ECHO')
   if (context >= 131072) tags.push('Long Context')
   if (/linear|recurrent|mamba|rwkv/i.test(modelType)) tags.push('Linear Attention')
   if (!tags.length) tags.push('Dense')
+  const card = parseCardStats(readme)
+  const total = card.total || Number(m.safetensors && m.safetensors.total) || 0
+  const active = card.active || 0
   const stats = {
-    total: '?',
-    active: '?',
+    total: total ? compact(total) : '?',
+    active: active ? compact(active) : '?',
     layers: String(layers),
     context: context ? compact(context) : '?',
     experts: experts > 1 ? String(experts) + (topK ? ' · top-' + topK : '') : 'Dense',
     topK: topK ? String(topK) : '—',
   }
-  const config = { layers, dModel, heads, kvHeads, headDim, experts: experts || 0, shared: shared || 0, topK: topK || 0, vocab: vocab || 0, context: context || 0 }
-  const summary = `${org}/${name} · ${modelType} · ${layers} layers · d=${dModel} · ${kvHeads} KV heads${experts > 1 ? ` · ${experts} experts` : ''}. 从 Hugging Face config.json 自动读取的架构配置；总参/激活需以模型卡为准。`
+  const config = {
+    layers, dModel, heads, kvHeads, headDim, experts: experts || 0, shared: shared || 0, topK: topK || 0, vocab: vocab || 0, context: context || 0,
+    ...(total ? { total } : {}), ...(active ? { active } : {}),
+    modelType,
+    useVha,
+    useGatedAttn: Boolean(cfg.use_gated_attn),
+    useQkNorm: Boolean(cfg.use_qk_norm),
+    ...(Array.isArray(cfg.compress_ratios) ? { compressRatios: cfg.compress_ratios.map((x) => Number(x) || 0) } : {}),
+    ...(cfg.hybrid_mla_attention ? { hybridMla: String(cfg.hybrid_mla_attention) } : {}),
+  }
+  const summary = `${org}/${name} · ${modelType} · ${layers} layers · d=${dModel} · ${kvHeads} KV heads${experts > 1 ? ` · ${experts} experts` : ''}${useVha ? ' · VHA in every attention layer' : ''}. 从 Hugging Face config.json + 模型卡自动读取；总参/激活缺失时才显示 ?。`
   return {
     id: 'hf-' + slug(id),
     name,

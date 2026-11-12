@@ -24,6 +24,8 @@ const SCENE_SIZE = {
   ffn: [2.9, 1.3, 2.25],
   head: [2.55, 0.72, 2.0],
   custom: [1.95, 0.72, 1.6],
+  vha: [2.35, 0.78, 1.85],
+  gate: [2.15, 0.72, 1.7],
 }
 
 function sceneSize(kind, special) {
@@ -139,12 +141,13 @@ function buildSceneGraph(model, index) {
       : variantKind === 'hybrid' ? [6.2, -0.2, 0.35]
         : variantKind === 'mla' || variantKind === 'dsa' ? [6.4, -0.2, 0.35]
           : [6.05, -0.2, 0.35]
-  const attnLabel = variantKind === 'dsa' ? 'MLA + DSA'
+  const baseAttnLabel = variantKind === 'dsa' ? (v.vha ? 'MLA-DSA' : 'MLA + DSA')
     : variantKind === 'mla' ? 'MLA 注意力'
-      : variantKind === 'hybrid' ? `${v.badge} 压缩注意力`
+      : variantKind === 'hybrid' ? (v.vha ? 'HCA' : `${v.badge} 压缩注意力`)
         : variantKind === 'linear' ? v.label
           : variantKind === 'local' ? '滑动窗口'
             : v.label || '自注意力'
+  const attnLabel = v.vha ? `${baseAttnLabel}+VHA` : baseAttnLabel
 
   const attn = addRaw(attnId, attnPosition, {
     kind: 'attention',
@@ -337,6 +340,44 @@ function buildSceneGraph(model, index) {
     })
     link(norm2.id, ffn.id, 'main')
     link(ffn.id, res2.id, 'main')
+  }
+
+  /* ------------------------------------------------------------ VHA sublayer */
+  if (v.vha) {
+    const removeEdge = (from, to) => {
+      for (let i = edges.length - 1; i >= 0; i--) {
+        if (edges[i].from === from && edges[i].to === to) edges.splice(i, 1)
+      }
+    }
+    const qNode = nodes.find((n) => n.id === 'scene-q')
+    if (qNode) {
+      const premix = addS('scene-premix', 'Q Premix', 'vha', [4.55, -3.55, 2.75],
+        `[B, ${Math.max(1, Math.round(sh.H / 2))}, T, ${sh.Dh}] → [B, ${sh.H}, T, ${sh.Dh}]`,
+        'VHA 的 Q Premix：按 KV 组对物理 query head 做近恒等线性变换，扩展出虚拟 query head。',
+        '\\tilde Q_{i,g}=Q_iW_g^{premix},\\quad W_g^{premix}=I+\\alpha\\epsilon',
+        { group: 'attention', special: 'vha' })
+      removeEdge(qNode.id, attn.id)
+      link(qNode.id, premix.id, 'branch')
+      link(premix.id, attn.id, 'branch')
+    }
+    const postmix = addS('scene-postmix', 'Postmix', 'vha', [4.6, 1.85, 1.55],
+      `[B, ${sh.H}, T, ${sh.Dh}] → [B, T, ${d}]`,
+      'VHA 的 Linear Postmix：在 head 轴上做低秩 identity-residual 混合，融合跨组 head 特征；推理时可吸收进 W_O。',
+      "Y'=(I_{H_v}+BA^{\\top})Y,\\quad A,B\\in\\mathbb{R}^{H_v\\times r}",
+      { group: 'attention', special: 'vha' })
+    removeEdge(attn.id, outProj.id)
+    link(attn.id, postmix.id, 'main')
+    if (v.gated) {
+      const gate = addS('scene-gatevha', '输出门', 'gate', [5.45, 2.35, 0.7],
+        `[B, T, ${d}] → [B, T, ${d}]`,
+        '低秩门控注意力：输出门由低秩 query latent 计算，门控乘在 attention 输出上。',
+        'g=\\sigma(W_gq_{\\mathrm{latent}}),\\quad y=g\\odot y',
+        { group: 'attention', special: 'gate' })
+      link(postmix.id, gate.id, 'main')
+      link(gate.id, outProj.id, 'main')
+    } else {
+      link(postmix.id, outProj.id, 'main')
+    }
   }
 
   /* -------------------------------------------------------- residual spine */

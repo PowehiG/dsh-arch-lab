@@ -21,6 +21,8 @@ const S3_COLORS = {
   expert: 0x8b5cf6,
   head: 0x34d399,
   custom: 0x818cf8,
+  vha: 0x22d3ee,
+  gate: 0xfbbf24,
 }
 
 function s3Color(kind, special) {
@@ -29,6 +31,8 @@ function s3Color(kind, special) {
   if (special === 'state') return 0x2dd4bf
   if (special === 'indexer') return 0xf472b6
   if (special === 'selector') return 0xfbbf24
+  if (special === 'vha') return 0x22d3ee
+  if (special === 'gate') return 0xfbbf24
   return S3_COLORS[kind] || S3_COLORS.custom
 }
 
@@ -36,10 +40,10 @@ function s3Color(kind, special) {
 
 function s3LabelCandidates(node) {
   const group = node.group || ''
-  const vertical = [[0, 0], [0, -42], [0, -84], [0, -126]]
+  const vertical = [[0, 0], [0, -42], [0, -84], [0, -126], [0, -168], [0, -210], [0, -252]]
   const right = [[104, -4], [156, -4], [210, -4], [156, -48], [210, -48], [104, -48], [260, -4], [260, -48], [260, -96], [210, -96], [260, -144], [160, -96]]
   const left = [[-104, -4], [-156, -4], [-210, -4], [-156, -48], [-210, -48], [-104, -48], [-260, -4], [-260, -48], [-260, -96], [-210, -96], [-260, -144], [-160, -96]]
-  const diagonal = [[64, -84], [-64, -84], [118, -90], [-118, -90], [174, -90], [-174, -90]]
+  const diagonal = [[64, -84], [-64, -84], [118, -90], [-118, -90], [174, -90], [-174, -90], [220, -140], [-220, -140], [260, -200], [-260, -200]]
   const below = [[0, 36], [96, 36], [-96, 36], [156, 36], [-156, 36]]
   if (group === 'moe') return [...left, ...vertical, ...right, ...diagonal, ...below]
   if (group === 'attention') return [...right, ...vertical, ...left, ...diagonal, ...below]
@@ -718,6 +722,17 @@ function LayerScene3D({ model, selectedNodeId, onSelect, onClear, flow, ctx }) {
             if (!best || score < best.score) best = { x, y, rect, score, area }
           }
           if (!best) continue
+          if (best.area > 0) {
+            const baseY = best.y
+            for (const dy of [-34, 34, -68, 68, -102, 102, -136, 136, -170, 170, -204, 204, -238, 238, -272, 272]) {
+              const y = Math.max(lh + 6, Math.min(h - 48, baseY + dy))
+              const rect = { l: best.x - lw / 2, r: best.x + lw / 2, t: y - lh, b: y }
+              let area = 0
+              for (const r of placed) area += s3OverlapArea(rect, r)
+              for (const [oid, r] of obstacles) if (oid !== node.id) area += s3OverlapArea(rect, r) * 2.4
+              if (area === 0) { best = { ...best, y, rect } ; break }
+            }
+          }
           placed.push(best.rect)
           el.style.transform = `translate(-50%,-100%) translate3d(${best.x.toFixed(1)}px,${best.y.toFixed(1)}px,0)`
           el.style.opacity = v.z < 1 ? '1' : '0'
@@ -809,6 +824,7 @@ function LayerScene3D({ model, selectedNodeId, onSelect, onClear, flow, ctx }) {
       h('span', { key: 'k', className: 'pl-l3-bar-k' }, '3D LAYER STRUCTURE'),
       h('b', { key: 'l', className: 'pl-l3-bar-l' }, `L${activeIndex + 1} / ${total}`),
       h('span', { key: 'v', className: 'pl-l3-bar-v', 'data-kind': variant.kind }, variant.badge),
+      variant.vha ? h('span', { key: 'vha', className: 'pl-l3-bar-v pl-vha-chip', title: 'Virtual Head Attention in this layer' }, 'VHA') : null,
       h('span', { key: 's', className: 'pl-l3-bar-shape' }, graph.shape),
       h('span', { key: 'kv', className: 'pl-l3-bar-kv' }, graph.kv),
       h('span', { key: 'sp', className: 'pl-l3-bar-sp' }),

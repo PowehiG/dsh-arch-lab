@@ -712,7 +712,7 @@ const CSS = `
   background:linear-gradient(90deg,rgba(125,211,252,.04),rgba(125,211,252,.55));opacity:0}
 .pl-s3-leader[data-selected="1"]{height:2px;background:linear-gradient(90deg,rgba(125,211,252,.12),rgba(125,211,252,.9));
   box-shadow:0 0 8px rgba(34,211,238,.45)}
-.pl-s3-label{position:absolute;left:0;top:0;display:flex;flex-direction:column;gap:2px;max-width:132px;
+.pl-s3-label{position:absolute;left:0;top:0;display:flex;flex-direction:column;gap:2px;max-width:112px;
   padding:4px 6px;border-radius:6px;opacity:0;will-change:transform;
   background:color-mix(in srgb,var(--dsw-alias-bg-base) 84%,transparent);
   border:1px solid color-mix(in srgb,var(--pl-line) 84%,transparent);
@@ -722,7 +722,7 @@ const CSS = `
 .pl-s3-label b{font-size:9px;font-weight:620;line-height:1.15;color:var(--pl-text);
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis;letter-spacing:.005em}
 .pl-s3-label code{font:8px "SFMono-Regular",ui-monospace,Menlo,monospace;line-height:1.15;color:var(--pl-dim);
-  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:120px}
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100px}
 .pl-s3-label[data-selected="1"]{z-index:6;border-color:color-mix(in srgb,var(--pl-cyan) 72%,transparent);
   box-shadow:0 0 0 1px color-mix(in srgb,var(--pl-cyan) 28%,transparent),0 8px 24px rgba(0,0,0,.42)}
 .pl-s3-label[data-selected="1"] b{color:color-mix(in srgb,var(--pl-cyan) 82%,var(--pl-text))}
@@ -731,6 +731,8 @@ const CSS = `
 .pl-s3-legend{position:absolute;left:36px;top:11px;z-index:3;pointer-events:none;display:flex;align-items:center;gap:9px;
   padding:4px 7px;border-radius:6px;background:color-mix(in srgb,var(--dsw-alias-bg-base) 46%,transparent);
   border:1px solid color-mix(in srgb,var(--pl-line) 52%,transparent);backdrop-filter:blur(5px)}
+.pl-vha-chip{color:var(--pl-cyan);border-color:color-mix(in srgb,var(--pl-cyan) 48%,transparent);
+  background:color-mix(in srgb,var(--pl-cyan) 11%,transparent);letter-spacing:.08em}
 .pl-s3-legend span{display:inline-flex;align-items:center;gap:4px;white-space:nowrap}
 .pl-s3-legend i{width:5px;height:5px;border-radius:50%;box-shadow:0 0 7px currentColor}
 .pl-s3-legend b{font-size:7.5px;font-weight:500;color:var(--pl-dim);letter-spacing:.02em}
