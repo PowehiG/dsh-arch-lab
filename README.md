@@ -134,7 +134,21 @@ h · 残差流
 - **设计要点**：5–8 张可展开卡片，每张都有中文解释、LaTeX 公式和符号表。
 - **参数 / KV 计算器**：改层数、hidden size、专家数、top-k、KV heads，实时估算总参、激活参数、每 token KV 字节数和单层参数量。
 - **模型对比**：最多 4 个模型并排，比较参数效率、KV 成本、上下文和结构标签。
-- **论文解析**：粘贴 arXiv HTML / abs 页 URL 或论文正文，自动抽取标题、hidden size、层数、专家数、top-k、上下文和公式，生成可导入的草稿。
+- **论文解析**：粘贴 arXiv **PDF / HTML / abs** URL、普通论文页或正文；PDF 会自动转文本，优先使用 arXiv HTML，再退回 PDF / 摘要。自动抽取标题、hidden size、层数、专家数、top-k、上下文和公式，生成可导入的草稿。
+- **在线发现**：工具栏刷新按钮会实时搜索最新 arXiv cs.CL 论文与 Hugging Face `text-generation` 模型的 `config.json`；点击“解析”或“导入”即可加入实验室。
+
+## 更新 / 发现最新模型
+
+工具栏的刷新按钮不再是“重新读一遍静态 JSON”。点击它（或打开面板后自动预热）会：
+
+1. 查询 **arXiv API** 最近的 cs.CL 论文，按提交时间倒序，返回标题、摘要、作者、日期、abs/HTML/PDF 链接；
+2. 查询 **Hugging Face API** 的最新 + 高赞 `text-generation` 模型，过滤 GGUF / 量化 / LoRA / adapter 等衍生仓库，读取公开 `config.json`；
+3. 从 config 推导层数、hidden size、heads、KV heads、head dim、专家数、top-k、上下文和词表，生成可直接导入的架构草稿；
+4. 在「发现最新模型」弹窗里分别展示论文与模型；论文点“解析”会预填并抓取全文，模型点“导入”会直接进入实验室。
+
+结果在 Host 内存缓存 15 分钟；工具栏刷新图标上的数字表示本次发现的条目数。网络不可用时会显示 warning，但不会影响内置的 16 个模型和 2D/3D 视图。
+
+> arXiv / Hugging Face 都是公开 API；搜索结果不代表模型质量排名。Hugging Face 侧只提取 `config.json` 的公开字段，总参/激活仍以模型卡为准。
 
 ## 交互
 
@@ -150,6 +164,7 @@ h · 残差流
 | `fit` / 双击空白 / `0` | 重新自动取景 |
 | 顶部 `−` / `+` | 缩小 / 放大 |
 | 标签按钮 | 显示 / 隐藏模块 label 与引线 |
+| 工具栏刷新按钮 | 搜索最新 arXiv 论文 + Hugging Face config，并打开「发现最新模型」 |
 | 暂停 / 播放 | 开关数据流粒子 |
 | 点击展开设计要点 | 查看该模型的关键公式 |
 | 2D 双击 `×N` 重复块 | 进入层内视图 |
@@ -200,10 +215,10 @@ Host 半注册了 `paper_lab` 工具，Agent 可以直接抓论文并把结构�
 
 ```
 dsh-arch-lab/
-├── package.json          # dsh.bundle.patch + dsh.client 清单
+├── package.json          # dsh.bundle.patch + dsh.client 清单；依赖 pdf-parse
 ├── cordis.patch.yml      # 插入 include:arch-lab
 ├── host2.js              # Host：/paper-lab/api/* + paper_lab 工具
-├── client.js             # 构建产物（浏览器半，含 Three.js，约 823 KB）
+├── client.js             # 构建产物（浏览器半，含 Three.js，约 832 KB）
 ├── build.mjs             # 把 src/*.js + vendor/three.min.js 拼成 client.js
 ├── data/models.json      # 16 个内置模型（约 134 KB）
 ├── icon.svg              # 侧边栏图标
@@ -281,7 +296,7 @@ node build.mjs
 
 ## 验证记录
 
-- `node --check client.js` 通过；`client.js` 约 823 KB（含 Three.js r128）
+- `node --check client.js` 通过；`client.js` 约 832 KB（含 Three.js r128）
 - 浏览器渲染：16 个模型的 3D 场景全部出 canvas，无 fallback；18 个 DSA 模块、17 个 MLA/CSA 模块、15–17 个线性/局部/全注意力模块
 - DSA 逐模块点击：Q / KV 压缩 / Latent Cache / KV 升维 / Indexer / Top-k / 注意力 / 输出投影 / MoE / Router 全部选中正确的检查器与公式
 - 每模型抽 4 层（首层、第 2 层、中间层、末层）检查：标签无重叠、无裁切、模块中心不被底部滑杆遮挡
@@ -289,6 +304,8 @@ node build.mjs
 - 2D 回归：16 个模型宏观/层内渲染、对比、计算器、论文解析/导入、Hybrid 节点检查器全部通过
 - WebGL 禁用时：17 个模块的 fallback 列表正常显示
 - `paper_lab.publish` → `/paper-lab/api/custom` 可见 → `clear` 清空
+- arXiv PDF URL（`/pdf/2610.17959`）→ 优先 arXiv HTML，返回全文而不是 PDF 二进制；无 HTML 时用 `pdf-parse` 抽文本
+- 在线发现端点：arXiv 18 条 + Hugging Face 12 条 config 候选；发现弹窗可解析论文或导入模型
 
 ## 已知限制
 
@@ -298,3 +315,5 @@ node build.mjs
 - 3D 坐标是为了可读性手工设计的结构示意，不是按真实张量尺寸比例缩放；形状以 label / 检查器为准。
 - 论文解析是启发式抽取，不保证还原论文全部结构；导入后可在 JSON 页签手动修正。
 - `fetch` 仅允许公网 http(s)，拒绝内网地址；arXiv 偶发反爬会退回 abs 摘要页。
+- PDF 解析使用 `pdf-parse`（PDF.js），对扫描版/加密 PDF 可能失败；arXiv 论文优先走 HTML，失败才走 PDF。
+- 在线发现依赖 arXiv/Hugging Face 公共 API，限流或网络异常时会降级为内置模型；Hugging Face 的 config 不包含总参/激活与训练细节。

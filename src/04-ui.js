@@ -935,11 +935,14 @@ const LAB_HINTS = [
   ['deepseek', 'DeepSeek-AI'], ['qwen', 'Alibaba Qwen'], ['kimi', 'Moonshot AI'], ['moonshot', 'Moonshot AI'],
   ['minimax', 'MiniMax'], ['glm', 'Zhipu AI'], ['zhipu', 'Zhipu AI'], ['llama', 'Meta'], ['meta ai', 'Meta'],
   ['gemma', 'Google DeepMind'], ['gemini', 'Google DeepMind'], ['gpt', 'OpenAI'], ['mistral', 'Mistral AI'],
-  ['grok', 'xAI'], ['ernie', 'Baidu'], ['hunyuan', 'Tencent'], ['step', 'StepFun'], ['yi', '01.AI'],
+  ['grok', 'xAI'], ['ernie', 'Baidu'], ['baidu', 'Baidu'], ['hunyuan', 'Tencent'], ['step', 'StepFun'], ['yi', '01.AI'],
+  ['peking', 'Peking University'], ['tsinghua', 'Tsinghua University'], ['baichuan', 'Baichuan'], ['internlm', 'Shanghai AI Lab'],
 ]
 
 const TAG_RULES = [
   ['DSA', /deepseek sparse attention|\bDSA\b/i],
+  ['VHA', /\bVHA\b|virtual head attention/i],
+  ['MFA', /\bMFA\b|multi[- ]matrix factorization attention/i],
   ['CSA', /\bCSA\b|compressed sparse attention/i],
   ['HCA', /\bHCA\b|hybrid compressed attention/i],
   ['MLA', /\bMLA\b|multi-head latent attention|low-rank kv/i],
@@ -958,10 +961,13 @@ const TAG_RULES = [
   ['Muon', /muon|newton[- ]schulz/i],
   ['FP8', /\bFP8\b|fp4|mxfp4/i],
   ['Engram', /engram/i],
+  ['KV Cache', /kv cache|key[- ]value cache/i],
+  ['Long Context', /long[- ]context|1m context|million[- ]token/i],
+  ['Attention', /attention mechanism|\battention\b/i],
 ]
 
 function guessOrg(text) {
-  const low = String(text || '').toLowerCase().slice(0, 30000)
+  const low = String(text || '').toLowerCase().slice(0, 8000)
   for (const [needle, org] of LAB_HINTS) {
     const escaped = needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
     if (new RegExp(`(^|[^a-z0-9])${escaped}([^a-z0-9]|$)`, 'i').test(low)) return org
@@ -1000,13 +1006,29 @@ function firstNumber(text, patterns, min, max) {
   return 0
 }
 
-function analyzePaper(text, fallbackTitle) {
+function extractAbstract(text) {
+  const src = String(text || '')
+  const patterns = [
+    /(?:^|\n)#{1,6}\s*Abstract\s*\n([\s\S]*?)(?=\n#{1,6}\s|\n(?:1|I)\.?\s+Introduction\b|\nIntroduction\b|\nKeywords\b)/i,
+    /(?:^|\n)Abstract\s*\n([\s\S]*?)(?=\n(?:1|I)\.?\s+Introduction\b|\nIntroduction\b|\nKeywords\b|\nReferences\b)/i,
+    /(?:^|\n)摘要\s*\n([\s\S]*?)(?=\n(?:1|一)[、.．\s]*引言|\n关键词|\n参考文献)/,
+  ]
+  for (const re of patterns) {
+    const match = src.match(re)
+    if (match && match[1] && match[1].trim().length > 120) return match[1].trim()
+  }
+  return src.slice(0, 6000)
+}
+
+function analyzePaper(text, fallbackTitle, meta = {}) {
   const src = String(text || '')
   const lower = src.toLowerCase()
   const title = (fallbackTitle || guessTitle(src)).slice(0, 120)
   const org = guessOrg(src)
-  const tags = TAG_RULES.filter(([, re]) => re.test(src)).map(([tag]) => tag)
-  if (!tags.includes('MoE') && /experts?/i.test(src)) tags.push('MoE')
+  const abstract = extractAbstract(src)
+  const focus = `${title}\n${abstract}`
+  const tags = TAG_RULES.filter(([, re]) => re.test(focus)).map(([tag]) => tag)
+  if (!tags.includes('MoE') && /mixture[- ]of[- ]experts|\bMoE\b/i.test(focus)) tags.push('MoE')
 
   const config = {
     layers: firstNumber(src, [/(\d{1,3})\s*(?:transformer\s+)?layers/i, /(\d{1,3})\s*层/i], 4, 200),
@@ -1056,7 +1078,8 @@ function analyzePaper(text, fallbackTitle) {
     if (formulas.length >= 8) break
   }
 
-  const sentences = src
+  const ideasSrc = `${abstract}\n${src.slice(0, 18000)}`
+  const sentences = ideasSrc
     .replace(/\s+/g, ' ')
     .split(/(?<=[。.!?])\s+/)
     .map((s) => s.trim())
@@ -1087,6 +1110,8 @@ function analyzePaper(text, fallbackTitle) {
   const yearMatch = src.match(/(?:19|20)\d{2}/)
   const draft = {
     id: 'local-' + Date.now().toString(36),
+    paper: meta.url ? { title: title, url: String(meta.url) } : undefined,
+    confidence: meta.source === 'arxiv-html' ? 'arXiv HTML' : meta.source === 'pdf' ? 'PDF text' : meta.source === 'arxiv-abs' ? 'Abstract only' : 'Pasted text',
     name: title,
     org,
     released: (yearMatch ? yearMatch[0] : String(new Date().getFullYear())) + '-' + String(new Date().getMonth() + 1).padStart(2, '0'),
@@ -1102,33 +1127,105 @@ function analyzePaper(text, fallbackTitle) {
 }
 
 /* --------------------------------------------------------------- modals (1) */
-function PaperModal({ onClose, onImport, notify }) {
+function DiscoverModal({ data, busy, onClose, onRefresh, onPaper, onImport }) {
+  const papers = (data && Array.isArray(data.papers)) ? data.papers : []
+  const models = (data && Array.isArray(data.models)) ? data.models : []
+  const updated = data && data.updated ? String(data.updated).replace('T', ' ').slice(0, 16) : ''
+  const warning = data && Array.isArray(data.warnings) && data.warnings.length ? data.warnings.join(' · ') : ''
+  const section = (title, count, body) => h('div', { key: title, className: 'pl-discover-section' }, [
+    h('div', { key: 'h', className: 'pl-discover-head' }, [
+      h('b', { key: 't' }, title),
+      h('span', { key: 'c' }, count + ' 条'),
+    ]),
+    body,
+  ])
+  const paperRow = (p) => h('div', { key: p.id, className: 'pl-discover-row' }, [
+    h('div', { key: 'm', className: 'pl-discover-main' }, [
+      h('div', { key: 't', className: 'pl-discover-title', title: p.title }, p.title),
+      h('div', { key: 'x', className: 'pl-discover-meta' }, [
+        p.published || '—',
+        p.org || 'arXiv',
+        Array.isArray(p.authors) && p.authors.length ? p.authors.slice(0, 3).join(', ') : '',
+      ].filter(Boolean).join(' · ')),
+      h('div', { key: 's', className: 'pl-discover-sub' }, String(p.summary || '').slice(0, 300)),
+    ]),
+    p.url ? h('button', { key: 'b', type: 'button', className: 'pl-btn', 'data-primary': '1', onClick: () => onPaper(p) }, '解析') : null,
+  ])
+  const modelRow = (m) => h('div', { key: m.id, className: 'pl-discover-row' }, [
+    h('div', { key: 'm', className: 'pl-discover-main' }, [
+      h('div', { key: 't', className: 'pl-discover-title' }, [
+        m.name,
+        h('span', { key: 'd', className: 'pl-discover-badge' }, m.discovery === 'popular' ? '热门' : '最新'),
+      ]),
+      h('div', { key: 'x', className: 'pl-discover-meta' }, [
+        m.org,
+        m.released,
+        m.config ? `${m.config.layers} 层 · d=${m.config.dModel} · ${m.config.kvHeads || '?'} KV` : '',
+        m.discovery === 'popular' && m.likes ? `♥ ${fmtCount(m.likes)}` : '',
+      ].filter(Boolean).join(' · ')),
+      h('div', { key: 's', className: 'pl-discover-sub' }, String(m.summary || '').slice(0, 280)),
+      h('div', { key: 'g', className: 'pl-discover-tags' }, (m.tags || []).slice(0, 5).map((t) => h(Tag, { key: t }, t))),
+    ]),
+    h('button', { key: 'b', type: 'button', className: 'pl-btn', 'data-primary': '1', onClick: () => onImport(m) }, '导入'),
+  ])
+  return h(Modal, {
+    title: '发现最新模型',
+    subtitle: '实时搜索 arXiv cs.CL 与 Hugging Face config.json',
+    icon: 'sparkles',
+    wide: true,
+    onClose,
+    footer: [
+      h('span', { key: 'h', className: 'pl-hint' }, updated ? '更新于 ' + updated : '正在搜索最新论文与模型…'),
+      h('button', { key: 'r', type: 'button', className: 'pl-btn', onClick: onRefresh, disabled: busy }, busy ? h('span', { className: 'pl-spinner' }) : h(Glyph, { name: 'refresh', size: 12 }), '重新搜索'),
+    ],
+  }, h('div', { className: 'pl-discover' }, [
+    warning ? h('div', { key: 'w', className: 'pl-hint', style: { color: 'var(--pl-amber)' } }, '部分源不可用：' + warning) : null,
+    section('最新论文', papers.length, papers.length
+      ? papers.map(paperRow)
+      : h('div', { key: 'e', className: 'pl-empty' }, '暂时没有搜索到论文；点“重新搜索”重试。')),
+    section('最新模型', models.length, models.length
+      ? models.map(modelRow)
+      : h('div', { key: 'e', className: 'pl-empty' }, '暂时没有搜索到可解析的 config.json；点“重新搜索”重试。')),
+    h('div', { key: 'n', className: 'pl-hint' }, '模型来自 Hugging Face config.json，只提取公开的层数/宽度/头数/专家配置；论文选择“解析”后会抓取全文并填入解析器。'),
+  ]))
+}
+
+function PaperModal({ onClose, onImport, notify, seedUrl = '' }) {
   const [tab, setTab] = useState('text')
-  const [url, setUrl] = useState('')
+  const [url, setUrl] = useState(seedUrl || '')
   const [text, setText] = useState('')
   const [metaTitle, setMetaTitle] = useState('')
+  const [metaSource, setMetaSource] = useState('')
   const [busy, setBusy] = useState('')
   const [error, setError] = useState('')
   const [report, setReport] = useState(null)
   const [draft, setDraft] = useState(null)
   const [json, setJson] = useState('')
 
-  const grab = async () => {
-    if (!url.trim()) return
+  const grab = async (targetUrl) => {
+    const target = String(targetUrl || url).trim()
+    if (!target) return
     setBusy('fetch')
     setError('')
     try {
-      const data = await fetchJson('/paper-lab/api/fetch?url=' + encodeURIComponent(url.trim()) + '&max=120000')
+      const data = await fetchJson('/paper-lab/api/fetch?url=' + encodeURIComponent(target) + '&max=120000')
       if (data.error) throw new Error(data.error)
+      setUrl(target)
       setText(data.text || '')
       setMetaTitle(data.title || '')
-      notify('已抓取 ' + (data.text || '').length.toLocaleString() + ' 字符', 'ok')
+      setMetaSource(data.source || '')
+      const sourceLabel = data.source === 'pdf' ? ' · PDF 已转文本' : data.source === 'arxiv-html' ? ' · arXiv HTML' : data.source === 'arxiv-abs' ? ' · 仅摘要' : ''
+      notify('已抓取 ' + (data.text || '').length.toLocaleString() + ' 字符' + sourceLabel, 'ok')
     } catch (e) {
       setError('抓取失败：' + (e && e.message ? e.message : String(e)))
     } finally {
       setBusy('')
     }
   }
+
+  React.useEffect(() => {
+    if (seedUrl) grab(seedUrl)
+  }, [seedUrl])
 
   const analyze = () => {
     if (!text.trim()) {
@@ -1139,7 +1236,7 @@ function PaperModal({ onClose, onImport, notify }) {
     setError('')
     setTimeout(() => {
       try {
-        const result = analyzePaper(text, metaTitle)
+        const result = analyzePaper(text, metaTitle, { url, source: metaSource })
         setDraft(result.draft)
         setReport(result)
       } catch (e) {
@@ -1196,7 +1293,7 @@ function PaperModal({ onClose, onImport, notify }) {
                 onKeyDown: (e) => { if (e.key === 'Enter') grab() },
                 style: { paddingLeft: 10 },
               })),
-              h('button', { key: 'g', className: 'pl-btn', onClick: grab, disabled: busy === 'fetch' }, busy === 'fetch' ? h('span', { className: 'pl-spinner' }) : h(Glyph, { name: 'download', size: 12 }), '抓取'),
+              h('button', { key: 'g', className: 'pl-btn', onClick: () => grab(), disabled: busy === 'fetch' }, busy === 'fetch' ? h('span', { className: 'pl-spinner' }) : h(Glyph, { name: 'download', size: 12 }), '抓取'),
             ]),
             h('div', { key: 'l', className: 'pl-field' }, [
               h('span', { key: 'k', className: 'pl-label' }, '论文正文（可先粘贴 arXiv HTML / 摘要 / 架构章节）'),
@@ -1217,7 +1314,7 @@ function PaperModal({ onClose, onImport, notify }) {
             report && draft
               ? h('div', { key: 'r', className: 'pl-analyze', style: { marginTop: 14 } }, [
                   h('div', { key: 'rep', className: 'pl-report' }, [
-                    h('div', { key: 'k', className: 'pl-kicker' }, '抽取结果'),
+                    h('div', { key: 'k', className: 'pl-kicker' }, '抽取结果 · ' + (draft.confidence || '启发式')),
                     h('div', { key: 't', className: 'pl-report-row' }, [h('span', { key: 'k', className: 'pl-report-k' }, '标题'), h('span', { key: 'v', className: 'pl-report-v' }, draft.name)]),
                     h('div', { key: 'o', className: 'pl-report-row' }, [h('span', { key: 'k', className: 'pl-report-k' }, '机构'), h('span', { key: 'v', className: 'pl-report-v' }, draft.org)]),
                     h('div', { key: 'c', className: 'pl-report-row' }, [

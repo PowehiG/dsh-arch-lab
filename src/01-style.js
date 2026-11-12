@@ -81,6 +81,10 @@ const CSS = `
 .pl-pill-params{font-size:10px;color:var(--pl-dim);font-variant-numeric:tabular-nums}
 
 .pl-actions{display:flex;align-items:center;gap:6px;flex:0 0 auto}
+.pl-refresh-wrap{position:relative;display:inline-flex;align-items:center}
+.pl-refresh-badge{position:absolute;right:-4px;top:-4px;min-width:13px;height:13px;padding:0 3px;border-radius:7px;
+  display:grid;place-items:center;background:var(--pl-cyan);color:#061018;font-size:7.5px;font-weight:750;line-height:1;
+  box-shadow:0 0 0 2px var(--dsw-alias-bg-base),0 0 8px rgba(34,211,238,.55);pointer-events:none}
 .pl-iconbtn{
   appearance:none;border:1px solid transparent;background:transparent;color:var(--pl-dim);
   width:32px;height:32px;border-radius:9px;display:grid;place-items:center;cursor:pointer;
@@ -416,6 +420,23 @@ const CSS = `
 .pl-report-k{flex:0 0 64px;color:var(--pl-dim);font-size:9.5px;letter-spacing:.06em;text-transform:uppercase;padding-top:1px}
 .pl-report-v{flex:1;min-width:0;color:var(--pl-text);word-break:break-word}
 .pl-report-tags{display:flex;flex-wrap:wrap;gap:4px}
+.pl-discover{display:flex;flex-direction:column;gap:18px}
+.pl-discover-section{display:flex;flex-direction:column;gap:7px}
+.pl-discover-head{display:flex;align-items:baseline;gap:8px;padding-bottom:3px;border-bottom:1px solid var(--pl-line)}
+.pl-discover-head b{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--pl-text)}
+.pl-discover-head span{font-size:9.5px;color:var(--pl-dim)}
+.pl-discover-row{display:flex;align-items:flex-start;gap:12px;padding:9px 10px;border:1px solid var(--pl-line);
+  border-radius:8px;background:color-mix(in srgb,var(--dsw-alias-bg-base) 28%,transparent)}
+.pl-discover-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px}
+.pl-discover-title{font-size:11.5px;font-weight:600;line-height:1.35;color:var(--pl-text);word-break:break-word}
+.pl-discover-meta{font-size:9px;color:var(--pl-dim);line-height:1.4}
+.pl-discover-sub{font-size:10px;line-height:1.5;color:color-mix(in srgb,var(--pl-text) 72%,var(--pl-dim));display:-webkit-box;
+  -webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.pl-discover-badge{display:inline-block;margin-left:6px;padding:1px 5px;border-radius:4px;font-size:8px;font-weight:600;
+  color:var(--pl-cyan);border:1px solid color-mix(in srgb,var(--pl-cyan) 38%,transparent);vertical-align:1px}
+.pl-discover-tags{display:flex;flex-wrap:wrap;gap:4px;margin-top:2px}
+.pl-discover .pl-btn{flex:0 0 auto;margin-top:1px}
+@media (max-width:620px){.pl-discover-row{flex-direction:column}.pl-discover .pl-btn{align-self:flex-end}}
 .pl-spinner{width:12px;height:12px;border-radius:50%;border:2px solid color-mix(in srgb,var(--pl-cyan) 30%,transparent);
   border-top-color:var(--pl-cyan);animation:pl-spin .7s linear infinite;display:inline-block}
 @keyframes pl-spin{to{transform:rotate(360deg)}}

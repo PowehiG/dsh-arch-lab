@@ -102,6 +102,10 @@ const CSS = `
 .pl-pill-params{font-size:10px;color:var(--pl-dim);font-variant-numeric:tabular-nums}
 
 .pl-actions{display:flex;align-items:center;gap:6px;flex:0 0 auto}
+.pl-refresh-wrap{position:relative;display:inline-flex;align-items:center}
+.pl-refresh-badge{position:absolute;right:-4px;top:-4px;min-width:13px;height:13px;padding:0 3px;border-radius:7px;
+  display:grid;place-items:center;background:var(--pl-cyan);color:#061018;font-size:7.5px;font-weight:750;line-height:1;
+  box-shadow:0 0 0 2px var(--dsw-alias-bg-base),0 0 8px rgba(34,211,238,.55);pointer-events:none}
 .pl-iconbtn{
   appearance:none;border:1px solid transparent;background:transparent;color:var(--pl-dim);
   width:32px;height:32px;border-radius:9px;display:grid;place-items:center;cursor:pointer;
@@ -437,6 +441,23 @@ const CSS = `
 .pl-report-k{flex:0 0 64px;color:var(--pl-dim);font-size:9.5px;letter-spacing:.06em;text-transform:uppercase;padding-top:1px}
 .pl-report-v{flex:1;min-width:0;color:var(--pl-text);word-break:break-word}
 .pl-report-tags{display:flex;flex-wrap:wrap;gap:4px}
+.pl-discover{display:flex;flex-direction:column;gap:18px}
+.pl-discover-section{display:flex;flex-direction:column;gap:7px}
+.pl-discover-head{display:flex;align-items:baseline;gap:8px;padding-bottom:3px;border-bottom:1px solid var(--pl-line)}
+.pl-discover-head b{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--pl-text)}
+.pl-discover-head span{font-size:9.5px;color:var(--pl-dim)}
+.pl-discover-row{display:flex;align-items:flex-start;gap:12px;padding:9px 10px;border:1px solid var(--pl-line);
+  border-radius:8px;background:color-mix(in srgb,var(--dsw-alias-bg-base) 28%,transparent)}
+.pl-discover-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px}
+.pl-discover-title{font-size:11.5px;font-weight:600;line-height:1.35;color:var(--pl-text);word-break:break-word}
+.pl-discover-meta{font-size:9px;color:var(--pl-dim);line-height:1.4}
+.pl-discover-sub{font-size:10px;line-height:1.5;color:color-mix(in srgb,var(--pl-text) 72%,var(--pl-dim));display:-webkit-box;
+  -webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.pl-discover-badge{display:inline-block;margin-left:6px;padding:1px 5px;border-radius:4px;font-size:8px;font-weight:600;
+  color:var(--pl-cyan);border:1px solid color-mix(in srgb,var(--pl-cyan) 38%,transparent);vertical-align:1px}
+.pl-discover-tags{display:flex;flex-wrap:wrap;gap:4px;margin-top:2px}
+.pl-discover .pl-btn{flex:0 0 auto;margin-top:1px}
+@media (max-width:620px){.pl-discover-row{flex-direction:column}.pl-discover .pl-btn{align-self:flex-end}}
 .pl-spinner{width:12px;height:12px;border-radius:50%;border:2px solid color-mix(in srgb,var(--pl-cyan) 30%,transparent);
   border-top-color:var(--pl-cyan);animation:pl-spin .7s linear infinite;display:inline-block}
 @keyframes pl-spin{to{transform:rotate(360deg)}}
@@ -3047,11 +3068,14 @@ const LAB_HINTS = [
   ['deepseek', 'DeepSeek-AI'], ['qwen', 'Alibaba Qwen'], ['kimi', 'Moonshot AI'], ['moonshot', 'Moonshot AI'],
   ['minimax', 'MiniMax'], ['glm', 'Zhipu AI'], ['zhipu', 'Zhipu AI'], ['llama', 'Meta'], ['meta ai', 'Meta'],
   ['gemma', 'Google DeepMind'], ['gemini', 'Google DeepMind'], ['gpt', 'OpenAI'], ['mistral', 'Mistral AI'],
-  ['grok', 'xAI'], ['ernie', 'Baidu'], ['hunyuan', 'Tencent'], ['step', 'StepFun'], ['yi', '01.AI'],
+  ['grok', 'xAI'], ['ernie', 'Baidu'], ['baidu', 'Baidu'], ['hunyuan', 'Tencent'], ['step', 'StepFun'], ['yi', '01.AI'],
+  ['peking', 'Peking University'], ['tsinghua', 'Tsinghua University'], ['baichuan', 'Baichuan'], ['internlm', 'Shanghai AI Lab'],
 ]
 
 const TAG_RULES = [
   ['DSA', /deepseek sparse attention|\bDSA\b/i],
+  ['VHA', /\bVHA\b|virtual head attention/i],
+  ['MFA', /\bMFA\b|multi[- ]matrix factorization attention/i],
   ['CSA', /\bCSA\b|compressed sparse attention/i],
   ['HCA', /\bHCA\b|hybrid compressed attention/i],
   ['MLA', /\bMLA\b|multi-head latent attention|low-rank kv/i],
@@ -3070,10 +3094,13 @@ const TAG_RULES = [
   ['Muon', /muon|newton[- ]schulz/i],
   ['FP8', /\bFP8\b|fp4|mxfp4/i],
   ['Engram', /engram/i],
+  ['KV Cache', /kv cache|key[- ]value cache/i],
+  ['Long Context', /long[- ]context|1m context|million[- ]token/i],
+  ['Attention', /attention mechanism|\battention\b/i],
 ]
 
 function guessOrg(text) {
-  const low = String(text || '').toLowerCase().slice(0, 30000)
+  const low = String(text || '').toLowerCase().slice(0, 8000)
   for (const [needle, org] of LAB_HINTS) {
     const escaped = needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
     if (new RegExp(`(^|[^a-z0-9])${escaped}([^a-z0-9]|$)`, 'i').test(low)) return org
@@ -3112,13 +3139,29 @@ function firstNumber(text, patterns, min, max) {
   return 0
 }
 
-function analyzePaper(text, fallbackTitle) {
+function extractAbstract(text) {
+  const src = String(text || '')
+  const patterns = [
+    /(?:^|\n)#{1,6}\s*Abstract\s*\n([\s\S]*?)(?=\n#{1,6}\s|\n(?:1|I)\.?\s+Introduction\b|\nIntroduction\b|\nKeywords\b)/i,
+    /(?:^|\n)Abstract\s*\n([\s\S]*?)(?=\n(?:1|I)\.?\s+Introduction\b|\nIntroduction\b|\nKeywords\b|\nReferences\b)/i,
+    /(?:^|\n)摘要\s*\n([\s\S]*?)(?=\n(?:1|一)[、.．\s]*引言|\n关键词|\n参考文献)/,
+  ]
+  for (const re of patterns) {
+    const match = src.match(re)
+    if (match && match[1] && match[1].trim().length > 120) return match[1].trim()
+  }
+  return src.slice(0, 6000)
+}
+
+function analyzePaper(text, fallbackTitle, meta = {}) {
   const src = String(text || '')
   const lower = src.toLowerCase()
   const title = (fallbackTitle || guessTitle(src)).slice(0, 120)
   const org = guessOrg(src)
-  const tags = TAG_RULES.filter(([, re]) => re.test(src)).map(([tag]) => tag)
-  if (!tags.includes('MoE') && /experts?/i.test(src)) tags.push('MoE')
+  const abstract = extractAbstract(src)
+  const focus = `${title}\n${abstract}`
+  const tags = TAG_RULES.filter(([, re]) => re.test(focus)).map(([tag]) => tag)
+  if (!tags.includes('MoE') && /mixture[- ]of[- ]experts|\bMoE\b/i.test(focus)) tags.push('MoE')
 
   const config = {
     layers: firstNumber(src, [/(\d{1,3})\s*(?:transformer\s+)?layers/i, /(\d{1,3})\s*层/i], 4, 200),
@@ -3168,7 +3211,8 @@ function analyzePaper(text, fallbackTitle) {
     if (formulas.length >= 8) break
   }
 
-  const sentences = src
+  const ideasSrc = `${abstract}\n${src.slice(0, 18000)}`
+  const sentences = ideasSrc
     .replace(/\s+/g, ' ')
     .split(/(?<=[。.!?])\s+/)
     .map((s) => s.trim())
@@ -3199,6 +3243,8 @@ function analyzePaper(text, fallbackTitle) {
   const yearMatch = src.match(/(?:19|20)\d{2}/)
   const draft = {
     id: 'local-' + Date.now().toString(36),
+    paper: meta.url ? { title: title, url: String(meta.url) } : undefined,
+    confidence: meta.source === 'arxiv-html' ? 'arXiv HTML' : meta.source === 'pdf' ? 'PDF text' : meta.source === 'arxiv-abs' ? 'Abstract only' : 'Pasted text',
     name: title,
     org,
     released: (yearMatch ? yearMatch[0] : String(new Date().getFullYear())) + '-' + String(new Date().getMonth() + 1).padStart(2, '0'),
@@ -3214,33 +3260,105 @@ function analyzePaper(text, fallbackTitle) {
 }
 
 /* --------------------------------------------------------------- modals (1) */
-function PaperModal({ onClose, onImport, notify }) {
+function DiscoverModal({ data, busy, onClose, onRefresh, onPaper, onImport }) {
+  const papers = (data && Array.isArray(data.papers)) ? data.papers : []
+  const models = (data && Array.isArray(data.models)) ? data.models : []
+  const updated = data && data.updated ? String(data.updated).replace('T', ' ').slice(0, 16) : ''
+  const warning = data && Array.isArray(data.warnings) && data.warnings.length ? data.warnings.join(' · ') : ''
+  const section = (title, count, body) => h('div', { key: title, className: 'pl-discover-section' }, [
+    h('div', { key: 'h', className: 'pl-discover-head' }, [
+      h('b', { key: 't' }, title),
+      h('span', { key: 'c' }, count + ' 条'),
+    ]),
+    body,
+  ])
+  const paperRow = (p) => h('div', { key: p.id, className: 'pl-discover-row' }, [
+    h('div', { key: 'm', className: 'pl-discover-main' }, [
+      h('div', { key: 't', className: 'pl-discover-title', title: p.title }, p.title),
+      h('div', { key: 'x', className: 'pl-discover-meta' }, [
+        p.published || '—',
+        p.org || 'arXiv',
+        Array.isArray(p.authors) && p.authors.length ? p.authors.slice(0, 3).join(', ') : '',
+      ].filter(Boolean).join(' · ')),
+      h('div', { key: 's', className: 'pl-discover-sub' }, String(p.summary || '').slice(0, 300)),
+    ]),
+    p.url ? h('button', { key: 'b', type: 'button', className: 'pl-btn', 'data-primary': '1', onClick: () => onPaper(p) }, '解析') : null,
+  ])
+  const modelRow = (m) => h('div', { key: m.id, className: 'pl-discover-row' }, [
+    h('div', { key: 'm', className: 'pl-discover-main' }, [
+      h('div', { key: 't', className: 'pl-discover-title' }, [
+        m.name,
+        h('span', { key: 'd', className: 'pl-discover-badge' }, m.discovery === 'popular' ? '热门' : '最新'),
+      ]),
+      h('div', { key: 'x', className: 'pl-discover-meta' }, [
+        m.org,
+        m.released,
+        m.config ? `${m.config.layers} 层 · d=${m.config.dModel} · ${m.config.kvHeads || '?'} KV` : '',
+        m.discovery === 'popular' && m.likes ? `♥ ${fmtCount(m.likes)}` : '',
+      ].filter(Boolean).join(' · ')),
+      h('div', { key: 's', className: 'pl-discover-sub' }, String(m.summary || '').slice(0, 280)),
+      h('div', { key: 'g', className: 'pl-discover-tags' }, (m.tags || []).slice(0, 5).map((t) => h(Tag, { key: t }, t))),
+    ]),
+    h('button', { key: 'b', type: 'button', className: 'pl-btn', 'data-primary': '1', onClick: () => onImport(m) }, '导入'),
+  ])
+  return h(Modal, {
+    title: '发现最新模型',
+    subtitle: '实时搜索 arXiv cs.CL 与 Hugging Face config.json',
+    icon: 'sparkles',
+    wide: true,
+    onClose,
+    footer: [
+      h('span', { key: 'h', className: 'pl-hint' }, updated ? '更新于 ' + updated : '正在搜索最新论文与模型…'),
+      h('button', { key: 'r', type: 'button', className: 'pl-btn', onClick: onRefresh, disabled: busy }, busy ? h('span', { className: 'pl-spinner' }) : h(Glyph, { name: 'refresh', size: 12 }), '重新搜索'),
+    ],
+  }, h('div', { className: 'pl-discover' }, [
+    warning ? h('div', { key: 'w', className: 'pl-hint', style: { color: 'var(--pl-amber)' } }, '部分源不可用：' + warning) : null,
+    section('最新论文', papers.length, papers.length
+      ? papers.map(paperRow)
+      : h('div', { key: 'e', className: 'pl-empty' }, '暂时没有搜索到论文；点“重新搜索”重试。')),
+    section('最新模型', models.length, models.length
+      ? models.map(modelRow)
+      : h('div', { key: 'e', className: 'pl-empty' }, '暂时没有搜索到可解析的 config.json；点“重新搜索”重试。')),
+    h('div', { key: 'n', className: 'pl-hint' }, '模型来自 Hugging Face config.json，只提取公开的层数/宽度/头数/专家配置；论文选择“解析”后会抓取全文并填入解析器。'),
+  ]))
+}
+
+function PaperModal({ onClose, onImport, notify, seedUrl = '' }) {
   const [tab, setTab] = useState('text')
-  const [url, setUrl] = useState('')
+  const [url, setUrl] = useState(seedUrl || '')
   const [text, setText] = useState('')
   const [metaTitle, setMetaTitle] = useState('')
+  const [metaSource, setMetaSource] = useState('')
   const [busy, setBusy] = useState('')
   const [error, setError] = useState('')
   const [report, setReport] = useState(null)
   const [draft, setDraft] = useState(null)
   const [json, setJson] = useState('')
 
-  const grab = async () => {
-    if (!url.trim()) return
+  const grab = async (targetUrl) => {
+    const target = String(targetUrl || url).trim()
+    if (!target) return
     setBusy('fetch')
     setError('')
     try {
-      const data = await fetchJson('/paper-lab/api/fetch?url=' + encodeURIComponent(url.trim()) + '&max=120000')
+      const data = await fetchJson('/paper-lab/api/fetch?url=' + encodeURIComponent(target) + '&max=120000')
       if (data.error) throw new Error(data.error)
+      setUrl(target)
       setText(data.text || '')
       setMetaTitle(data.title || '')
-      notify('已抓取 ' + (data.text || '').length.toLocaleString() + ' 字符', 'ok')
+      setMetaSource(data.source || '')
+      const sourceLabel = data.source === 'pdf' ? ' · PDF 已转文本' : data.source === 'arxiv-html' ? ' · arXiv HTML' : data.source === 'arxiv-abs' ? ' · 仅摘要' : ''
+      notify('已抓取 ' + (data.text || '').length.toLocaleString() + ' 字符' + sourceLabel, 'ok')
     } catch (e) {
       setError('抓取失败：' + (e && e.message ? e.message : String(e)))
     } finally {
       setBusy('')
     }
   }
+
+  React.useEffect(() => {
+    if (seedUrl) grab(seedUrl)
+  }, [seedUrl])
 
   const analyze = () => {
     if (!text.trim()) {
@@ -3251,7 +3369,7 @@ function PaperModal({ onClose, onImport, notify }) {
     setError('')
     setTimeout(() => {
       try {
-        const result = analyzePaper(text, metaTitle)
+        const result = analyzePaper(text, metaTitle, { url, source: metaSource })
         setDraft(result.draft)
         setReport(result)
       } catch (e) {
@@ -3308,7 +3426,7 @@ function PaperModal({ onClose, onImport, notify }) {
                 onKeyDown: (e) => { if (e.key === 'Enter') grab() },
                 style: { paddingLeft: 10 },
               })),
-              h('button', { key: 'g', className: 'pl-btn', onClick: grab, disabled: busy === 'fetch' }, busy === 'fetch' ? h('span', { className: 'pl-spinner' }) : h(Glyph, { name: 'download', size: 12 }), '抓取'),
+              h('button', { key: 'g', className: 'pl-btn', onClick: () => grab(), disabled: busy === 'fetch' }, busy === 'fetch' ? h('span', { className: 'pl-spinner' }) : h(Glyph, { name: 'download', size: 12 }), '抓取'),
             ]),
             h('div', { key: 'l', className: 'pl-field' }, [
               h('span', { key: 'k', className: 'pl-label' }, '论文正文（可先粘贴 arXiv HTML / 摘要 / 架构章节）'),
@@ -3329,7 +3447,7 @@ function PaperModal({ onClose, onImport, notify }) {
             report && draft
               ? h('div', { key: 'r', className: 'pl-analyze', style: { marginTop: 14 } }, [
                   h('div', { key: 'rep', className: 'pl-report' }, [
-                    h('div', { key: 'k', className: 'pl-kicker' }, '抽取结果'),
+                    h('div', { key: 'k', className: 'pl-kicker' }, '抽取结果 · ' + (draft.confidence || '启发式')),
                     h('div', { key: 't', className: 'pl-report-row' }, [h('span', { key: 'k', className: 'pl-report-k' }, '标题'), h('span', { key: 'v', className: 'pl-report-v' }, draft.name)]),
                     h('div', { key: 'o', className: 'pl-report-row' }, [h('span', { key: 'k', className: 'pl-report-k' }, '机构'), h('span', { key: 'v', className: 'pl-report-v' }, draft.org)]),
                     h('div', { key: 'c', className: 'pl-report-row' }, [
@@ -4497,6 +4615,8 @@ function Panel({ ctx }) {
   const [toast, setToast] = useState(null)
   const [loadError, setLoadError] = useState('')
   const [refreshing, setRefreshing] = useState(false)
+  const [latest, setLatest] = useState(null)
+  const [latestBusy, setLatestBusy] = useState(false)
 
   React.useEffect(() => {
     const offTheme = ctx.on('theme/change', (snap) => {
@@ -4533,9 +4653,37 @@ function Panel({ ctx }) {
     }
   }, [ctx])
 
+  const loadLatest = React.useCallback(async (force, announce) => {
+    setLatestBusy(true)
+    try {
+      const data = await fetchJson('/paper-lab/api/' + (force ? 'refresh' : 'latest'))
+      if (!data || (!Array.isArray(data.papers) && !Array.isArray(data.models))) throw new Error('latest discovery returned no data')
+      setLatest(data)
+      if (announce) {
+        const count = (data.papers || []).length + (data.models || []).length
+        notify((zh ? '已发现 ' : 'Discovered ') + count + (zh ? ' 条最新内容' : ' latest items') + (data.warnings && data.warnings.length ? ' · ' + data.warnings[0] : ''), 'ok')
+      }
+      return data
+    } catch (e) {
+      if (announce) notify((zh ? '在线搜索失败：' : 'Discovery failed: ') + (e && e.message ? e.message : String(e)), 'err')
+      return null
+    } finally {
+      setLatestBusy(false)
+    }
+  }, [ctx])
+
   React.useEffect(() => {
     loadLibrary(false)
   }, [loadLibrary])
+
+  React.useEffect(() => {
+    loadLatest(false, false)
+  }, [loadLatest])
+
+  const refreshLatest = async () => {
+    const data = await loadLatest(true, true)
+    setModal({ type: 'latest', data: data || latest })
+  }
 
   React.useEffect(() => {
     const el = rootRef.current
@@ -4726,7 +4874,12 @@ function Panel({ ctx }) {
       h(IconButton, { key: 'paper', icon: 'sparkles', label: zh ? '解析论文' : 'Analyze a paper', onClick: () => setModal({ type: 'paper' }) }),
       h(IconButton, { key: 'cmp', icon: 'columns', label: zh ? '横向对比' : 'Compare', onClick: () => setModal({ type: 'compare' }) }),
       h(IconButton, { key: 'calc', icon: 'sigma', label: zh ? '参数计算器' : 'Parameter math', onClick: () => setModal({ type: 'calc' }) }),
-      h(IconButton, { key: 'refresh', icon: 'refresh', label: zh ? '刷新数据' : 'Refresh', onClick: () => loadLibrary(true), disabled: refreshing }),
+      h('div', { key: 'refreshwrap', className: 'pl-refresh-wrap' }, [
+        h(IconButton, { key: 'refresh', icon: 'refresh', label: zh ? '刷新并搜索最新论文/模型' : 'Refresh and discover latest papers/models', onClick: refreshLatest, disabled: latestBusy || refreshing }),
+        latest && ((latest.papers || []).length + (latest.models || []).length)
+          ? h('span', { key: 'badge', className: 'pl-refresh-badge', title: zh ? '发现的最新内容' : 'Discovered items' }, String((latest.papers || []).length + (latest.models || []).length))
+          : null,
+      ]),
     ]),
   ])
 
@@ -4943,7 +5096,21 @@ function Panel({ ctx }) {
         ])
       : null,
     modal && modal.type === 'paper'
-      ? h(PaperModal, { key: 'pm', onClose: () => setModal(null), onImport: importModel, notify })
+      ? h(PaperModal, { key: 'pm', seedUrl: modal.seedUrl || '', onClose: () => setModal(null), onImport: importModel, notify })
+      : null,
+    modal && modal.type === 'latest'
+      ? h(DiscoverModal, {
+          key: 'dm',
+          data: modal.data || latest,
+          busy: latestBusy,
+          onClose: () => setModal(null),
+          onRefresh: async () => {
+            const data = await loadLatest(true, true)
+            setModal({ type: 'latest', data: data || latest })
+          },
+          onPaper: (p) => setModal({ type: 'paper', seedUrl: p.url || p.html || p.pdf }),
+          onImport: (m) => { importModel(m); setModal(null) },
+        })
       : null,
     modal && modal.type === 'compare'
       ? h(CompareModal, { key: 'cm', models: all, selectedId: selected ? selected.id : '', onPick: (id) => { setSelectedId(id); setSelectedNodeId(null); setView('macro') }, onClose: () => setModal(null) })

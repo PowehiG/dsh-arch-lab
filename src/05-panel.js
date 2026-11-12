@@ -52,6 +52,8 @@ function Panel({ ctx }) {
   const [toast, setToast] = useState(null)
   const [loadError, setLoadError] = useState('')
   const [refreshing, setRefreshing] = useState(false)
+  const [latest, setLatest] = useState(null)
+  const [latestBusy, setLatestBusy] = useState(false)
 
   React.useEffect(() => {
     const offTheme = ctx.on('theme/change', (snap) => {
@@ -88,9 +90,37 @@ function Panel({ ctx }) {
     }
   }, [ctx])
 
+  const loadLatest = React.useCallback(async (force, announce) => {
+    setLatestBusy(true)
+    try {
+      const data = await fetchJson('/paper-lab/api/' + (force ? 'refresh' : 'latest'))
+      if (!data || (!Array.isArray(data.papers) && !Array.isArray(data.models))) throw new Error('latest discovery returned no data')
+      setLatest(data)
+      if (announce) {
+        const count = (data.papers || []).length + (data.models || []).length
+        notify((zh ? '已发现 ' : 'Discovered ') + count + (zh ? ' 条最新内容' : ' latest items') + (data.warnings && data.warnings.length ? ' · ' + data.warnings[0] : ''), 'ok')
+      }
+      return data
+    } catch (e) {
+      if (announce) notify((zh ? '在线搜索失败：' : 'Discovery failed: ') + (e && e.message ? e.message : String(e)), 'err')
+      return null
+    } finally {
+      setLatestBusy(false)
+    }
+  }, [ctx])
+
   React.useEffect(() => {
     loadLibrary(false)
   }, [loadLibrary])
+
+  React.useEffect(() => {
+    loadLatest(false, false)
+  }, [loadLatest])
+
+  const refreshLatest = async () => {
+    const data = await loadLatest(true, true)
+    setModal({ type: 'latest', data: data || latest })
+  }
 
   React.useEffect(() => {
     const el = rootRef.current
@@ -281,7 +311,12 @@ function Panel({ ctx }) {
       h(IconButton, { key: 'paper', icon: 'sparkles', label: zh ? '解析论文' : 'Analyze a paper', onClick: () => setModal({ type: 'paper' }) }),
       h(IconButton, { key: 'cmp', icon: 'columns', label: zh ? '横向对比' : 'Compare', onClick: () => setModal({ type: 'compare' }) }),
       h(IconButton, { key: 'calc', icon: 'sigma', label: zh ? '参数计算器' : 'Parameter math', onClick: () => setModal({ type: 'calc' }) }),
-      h(IconButton, { key: 'refresh', icon: 'refresh', label: zh ? '刷新数据' : 'Refresh', onClick: () => loadLibrary(true), disabled: refreshing }),
+      h('div', { key: 'refreshwrap', className: 'pl-refresh-wrap' }, [
+        h(IconButton, { key: 'refresh', icon: 'refresh', label: zh ? '刷新并搜索最新论文/模型' : 'Refresh and discover latest papers/models', onClick: refreshLatest, disabled: latestBusy || refreshing }),
+        latest && ((latest.papers || []).length + (latest.models || []).length)
+          ? h('span', { key: 'badge', className: 'pl-refresh-badge', title: zh ? '发现的最新内容' : 'Discovered items' }, String((latest.papers || []).length + (latest.models || []).length))
+          : null,
+      ]),
     ]),
   ])
 
@@ -498,7 +533,21 @@ function Panel({ ctx }) {
         ])
       : null,
     modal && modal.type === 'paper'
-      ? h(PaperModal, { key: 'pm', onClose: () => setModal(null), onImport: importModel, notify })
+      ? h(PaperModal, { key: 'pm', seedUrl: modal.seedUrl || '', onClose: () => setModal(null), onImport: importModel, notify })
+      : null,
+    modal && modal.type === 'latest'
+      ? h(DiscoverModal, {
+          key: 'dm',
+          data: modal.data || latest,
+          busy: latestBusy,
+          onClose: () => setModal(null),
+          onRefresh: async () => {
+            const data = await loadLatest(true, true)
+            setModal({ type: 'latest', data: data || latest })
+          },
+          onPaper: (p) => setModal({ type: 'paper', seedUrl: p.url || p.html || p.pdf }),
+          onImport: (m) => { importModel(m); setModal(null) },
+        })
       : null,
     modal && modal.type === 'compare'
       ? h(CompareModal, { key: 'cm', models: all, selectedId: selected ? selected.id : '', onPick: (id) => { setSelectedId(id); setSelectedNodeId(null); setView('macro') }, onClose: () => setModal(null) })
