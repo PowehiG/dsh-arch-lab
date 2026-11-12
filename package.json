@@ -1,6 +1,6 @@
 {
   "name": "@powehig/dsh-arch-lab",
-  "version": "2.1.1",
+  "version": "2.1.2",
   "type": "module",
   "description": "Architecture microscope for DeepSeek Harness: per-layer 3D structural cutaways and 2D maps of frontier LLM papers, with tensor shapes, formulas and parameter math.",
   "icon": "./icon.svg",

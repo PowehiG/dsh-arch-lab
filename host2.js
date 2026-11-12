@@ -158,7 +158,7 @@ async function handleRoute(ctx, req, res) {
       return json(res, 200, data)
     }
     if (url.pathname === `${ROUTE_PREFIX}health`) {
-      return json(res, 200, { ok: true, custom: customModels.size, version: 10 })
+      return json(res, 200, { ok: true, custom: customModels.size, version: 11 })
     }
     return json(res, 404, { ok: false, error: 'not found' })
   } catch (error) {
@@ -666,7 +666,7 @@ async function searchHuggingFace() {
     full: 'true',
   })
   const mode = /^(1|true|yes)$/i.test(String(process.env.ARCH_LAB_HF_BASE_ONLY || ''))
-  const read = async (params, discovery) => {
+  const read = async (params, discovery, bucket) => {
     const response = await fetch(`https://huggingface.co/api/models?${params}`, {
       signal: AbortSignal.timeout(25000),
       headers: { 'user-agent': 'ArchLab/2.1 (Hugging Face discovery; contact via GitHub PowehiG)' },
@@ -674,9 +674,32 @@ async function searchHuggingFace() {
     if (!response.ok) throw new Error(`Hugging Face API HTTP ${response.status}`)
     const list = await response.json()
     if (!Array.isArray(list)) throw new Error('unexpected Hugging Face response')
-    return list.map((m) => ({ ...m, _discovery: discovery }))
+    return list.map((m) => ({ ...m, _discovery: discovery, _bucket: bucket }))
   }
-  const settled = await Promise.allSettled([read(latestParams, 'latest'), read(popularParams, 'popular')])
+  const officialAuthors = ['baidu', 'deepseek-ai', 'Qwen', 'zai-org', 'openai', 'google', 'meta-llama', 'mistralai', 'moonshotai', 'MiniMaxAI', 'nvidia', 'microsoft', 'tencent', 'stepfun-ai', '01-ai']
+  const officialParams = officialAuthors.map((author) => new URLSearchParams({
+    author,
+    sort: 'lastModified',
+    direction: '-1',
+    limit: '4',
+    filter: 'text-generation',
+    full: 'true',
+  }))
+  const familyQueries = ['ERNIE', 'DeepSeek', 'Qwen', 'Kimi', 'GLM', 'MiniMax', 'Llama', 'Gemma', 'gpt-oss', 'Mistral']
+  const familyParams = familyQueries.map((q) => new URLSearchParams({
+    search: q,
+    sort: 'lastModified',
+    direction: '-1',
+    limit: '4',
+    filter: 'text-generation',
+    full: 'true',
+  }))
+  const settled = await Promise.allSettled([
+    ...officialParams.map((params) => read(params, 'latest', 'official')),
+    ...familyParams.map((params) => read(params, 'latest', 'family')),
+    read(latestParams, 'latest', 'latest'),
+    read(popularParams, 'popular', 'popular'),
+  ])
   const merged = []
   const seen = new Set()
   for (const result of settled) {
@@ -691,9 +714,14 @@ async function searchHuggingFace() {
     const reason = settled.find((r) => r.status === 'rejected')
     throw reason && reason.reason ? reason.reason : new Error('Hugging Face returned no models')
   }
-  const candidates = merged
-    .filter((m) => isArchitectureCandidate(m, mode))
-    .slice(0, 24)
+  const eligible = merged.filter((m) => isArchitectureCandidate(m, mode))
+  const pick = (bucket, n) => eligible.filter((m) => m._bucket === bucket).slice(0, n)
+  const candidates = [
+    ...pick('official', 12),
+    ...pick('family', 6),
+    ...pick('latest', 5),
+    ...pick('popular', 6),
+  ].slice(0, 28)
   const specs = await mapLimit(candidates, 4, async (m) => {
     try {
       const configUrl = `https://huggingface.co/${m.id}/raw/main/config.json`
@@ -711,16 +739,24 @@ async function searchHuggingFace() {
     }
   })
   const valid = specs.filter(Boolean)
+  const seenBase = new Set()
+  const deduped = []
+  for (const m of valid) {
+    const key = m.org + '/' + m.name.replace(/-(BF16|FP16|FP8|BF8|W8A8|GPTQ|AWQ|GGUF)$/i, '').toLowerCase()
+    if (seenBase.has(key)) continue
+    seenBase.add(key)
+    deduped.push(m)
+  }
   const latestSpecs = []
   const byOwner = new Map()
-  for (const m of valid.filter((x) => x.discovery === 'latest')) {
+  for (const m of deduped.filter((x) => x.discovery === 'latest')) {
     const count = byOwner.get(m.org) || 0
     if (count >= 2) continue
     byOwner.set(m.org, count + 1)
     latestSpecs.push(m)
     if (latestSpecs.length >= 6) break
   }
-  const popularSpecs = valid.filter((m) => m.discovery === 'popular').slice(0, 6)
+  const popularSpecs = deduped.filter((m) => m.discovery === 'popular').slice(0, 6)
   return [...latestSpecs, ...popularSpecs].slice(0, 12)
 }
 
@@ -760,9 +796,14 @@ function huggingFaceSpec(m, cfg) {
   const tags = []
   if (experts > 1) tags.push('MoE')
   if (heads && kvHeads < heads) tags.push('GQA')
-  if (/mla|latent/i.test(modelType) || cfg.kv_lora_rank) tags.push('MLA')
+  if (/mla|latent/i.test(modelType) || cfg.kv_lora_rank || cfg.hybrid_mla_attention) tags.push('MLA')
   if (/vha|virtual.?head/i.test(modelType)) tags.push('VHA')
   if (/deepseek/i.test(modelType)) tags.push('MLA')
+  if (cfg.csa_dense_mode || /\bcsa\b/i.test(modelType)) tags.push('CSA')
+  if (cfg.hca_rope_type || /\bhca\b/i.test(modelType)) tags.push('HCA')
+  if (cfg.index_topk || cfg.index_n_heads) tags.push('DSA')
+  if (cfg.compress_ratios || /hybrid/i.test(modelType)) tags.push('Hybrid')
+  if (cfg.enable_hyper_connections) tags.push('mHC')
   if (/moe|mixture/i.test(modelType) && experts > 1) tags.push('MoE')
   if (context >= 131072) tags.push('Long Context')
   if (/linear|recurrent|mamba|rwkv/i.test(modelType)) tags.push('Linear Attention')

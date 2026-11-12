@@ -142,11 +142,11 @@ h · 残差流
 工具栏的刷新按钮不再是“重新读一遍静态 JSON”。点击它（或打开面板后自动预热）会：
 
 1. 查询 **arXiv API** 最近的 cs.CL 论文，按提交时间倒序，返回标题、摘要、作者、日期、abs/HTML/PDF 链接；
-2. 查询 **Hugging Face API** 的最新 + 高赞 `text-generation` 模型，过滤 GGUF / 量化 / LoRA / adapter 等衍生仓库，读取公开 `config.json`；
+2. 查询 **Hugging Face API** 的最新 + 高赞 `text-generation` 模型，并额外按官方实验室（Baidu、DeepSeek、Qwen、Z.ai、OpenAI、Google、Meta、Mistral、Moonshot、MiniMax 等）和模型家族（ERNIE、DeepSeek、Qwen、Kimi、GLM、MiniMax、Llama、Gemma、gpt-oss、Mistral）定向搜索，过滤 GGUF / 量化 / LoRA / adapter 等衍生仓库，读取公开 `config.json`；
 3. 从 config 推导层数、hidden size、heads、KV heads、head dim、专家数、top-k、上下文和词表，生成可直接导入的架构草稿；
 4. 在「发现最新模型」弹窗里分别展示论文与模型；论文点“解析”会预填并抓取全文，模型点“导入”会直接进入实验室。
 
-结果在 Host 内存缓存 15 分钟；工具栏刷新图标上的数字表示本次发现的条目数。网络不可用时会显示 warning，但不会影响内置的 16 个模型和 2D/3D 视图。
+结果在 Host 内存缓存 15 分钟；工具栏刷新图标上的数字表示本次发现的条目数。官方实验室定向查询保证刚发布、但已掉出“最新 60 条”的模型（例如 **Baidu `ERNIE-5.5-Flash-Base`**）仍能被发现。网络不可用时会显示 warning，但不会影响内置的 16 个模型和 2D/3D 视图。
 
 > arXiv / Hugging Face 都是公开 API；搜索结果不代表模型质量排名。Hugging Face 侧只提取 `config.json` 的公开字段，总参/激活仍以模型卡为准。
 
@@ -305,7 +305,8 @@ node build.mjs
 - WebGL 禁用时：17 个模块的 fallback 列表正常显示
 - `paper_lab.publish` → `/paper-lab/api/custom` 可见 → `clear` 清空
 - arXiv PDF URL（`/pdf/2610.17959`）→ 优先 arXiv HTML，返回全文而不是 PDF 二进制；无 HTML 时用 `pdf-parse` 抽文本
-- 在线发现端点：arXiv 18 条 + Hugging Face 12 条 config 候选；发现弹窗可解析论文或导入模型
+- 在线发现端点：arXiv 18 条 + Hugging Face 最多 12 条 config 候选；发现弹窗可解析论文或导入模型
+- 定向校验：`baidu/ERNIE-5.5-Flash-Base` 出现在发现结果中（43 层、4096 hidden、512 experts、top-10、1M ctx）
 
 ## 已知限制
 
